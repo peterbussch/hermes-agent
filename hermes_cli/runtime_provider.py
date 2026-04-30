@@ -475,11 +475,16 @@ def _resolve_named_custom_runtime(
     requested_norm = (requested_provider or "").strip().lower()
     if requested_norm == "custom" and explicit_base_url:
         base_url = explicit_base_url.strip().rstrip("/")
-        api_key_candidates = [
-            (explicit_api_key or "").strip(),
-            os.getenv("OPENAI_API_KEY", "").strip(),
-            os.getenv("OPENROUTER_API_KEY", "").strip(),
-        ]
+        api_key_candidates = [(explicit_api_key or "").strip()]
+        # Loopback gateways (e.g. OmniRoute on localhost) reject cloud
+        # provider keys with 401; only fall back to them for remote URLs.
+        if not _loopback_hostname(base_url_hostname(base_url)):
+            api_key_candidates.extend(
+                [
+                    os.getenv("OPENAI_API_KEY", "").strip(),
+                    os.getenv("OPENROUTER_API_KEY", "").strip(),
+                ]
+            )
         api_key = next(
             (c for c in api_key_candidates if has_usable_secret(c)),
             "",
@@ -518,9 +523,14 @@ def _resolve_named_custom_runtime(
         (explicit_api_key or "").strip(),
         str(custom_provider.get("api_key", "") or "").strip(),
         os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
-        os.getenv("OPENAI_API_KEY", "").strip(),
-        os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]
+    if not _loopback_hostname(base_url_hostname(base_url)):
+        api_key_candidates.extend(
+            [
+                os.getenv("OPENAI_API_KEY", "").strip(),
+                os.getenv("OPENROUTER_API_KEY", "").strip(),
+            ]
+        )
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
     result = {
