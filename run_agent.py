@@ -72,6 +72,15 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
+        # Loopback gateways (OmniRoute) reject any non-empty Bearer token
+        # with 401. Reuse the auxiliary_client helper to override the SDK's
+        # auto-generated Authorization with an empty Bearer when the resolved
+        # api_key is the "no auth needed" placeholder for a localhost URL.
+        try:
+            from agent.auxiliary_client import _apply_loopback_auth_override
+            kwargs = _apply_loopback_auth_override(kwargs)
+        except Exception:
+            pass
         return _load_openai_cls()(*args, **kwargs)
 
     def __instancecheck__(self, obj):

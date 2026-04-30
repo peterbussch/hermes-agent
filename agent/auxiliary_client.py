@@ -72,6 +72,36 @@ def _load_openai_cls() -> type:
     return _OPENAI_CLS_CACHE
 
 
+_LOOPBACK_AUTH_PLACEHOLDERS = ("no-key-required", "no-key", "")
+
+
+def _apply_loopback_auth_override(kwargs: dict) -> dict:
+    """Strip Authorization header for loopback URLs with a placeholder key.
+
+    Local gateways like OmniRoute reject any non-empty Bearer token (their
+    REQUIRE_API_KEY=false setting only honors requests with no Authorization
+    header). When the resolved api_key is one of the placeholder strings used
+    for "no auth needed" and the base_url is loopback, send an empty Bearer
+    via default_headers so the SDK's auto-generated Authorization is overridden
+    and the gateway's no-auth path applies.
+    """
+    api_key = str(kwargs.get("api_key") or "")
+    base_url = str(kwargs.get("base_url") or "")
+    if api_key not in _LOOPBACK_AUTH_PLACEHOLDERS:
+        return kwargs
+    try:
+        from utils import base_url_hostname
+    except Exception:
+        return kwargs
+    host = base_url_hostname(base_url)
+    if not host or host not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return kwargs
+    headers = dict(kwargs.get("default_headers") or {})
+    headers.setdefault("Authorization", "Bearer ")
+    kwargs["default_headers"] = headers
+    return kwargs
+
+
 class _OpenAIProxy:
     """Module-level proxy that looks like the ``openai.OpenAI`` class.
 
@@ -82,6 +112,7 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
+        kwargs = _apply_loopback_auth_override(kwargs)
         return _load_openai_cls()(*args, **kwargs)
 
     def __instancecheck__(self, obj):
