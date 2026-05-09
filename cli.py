@@ -19,7 +19,6 @@ import re
 import shutil
 import sys
 import json
-import re
 import concurrent.futures
 import base64
 import atexit
@@ -6729,7 +6728,7 @@ class HermesCLI:
                     sys_name = _plat.system()
                     chrome_cmd = manual_chrome_debug_command(_port, sys_name)
                     if chrome_cmd:
-                        print(f"     Launch Chrome manually:")
+                        print("     Launch Chrome manually:")
                         print(f"     {chrome_cmd}")
                     else:
                         print("     No Chrome/Chromium executable found in this environment")
@@ -10721,6 +10720,8 @@ class HermesCLI:
                 for p in _providers if isinstance(_providers, list) else []:
                     count = p.get("total_models", len(p.get("models", [])))
                     label = f"{p['name']} ({count} model{'s' if count != 1 else ''})"
+                    if p.get("warning"):
+                        label += f" — {p['warning']}"
                     if p.get("is_current"):
                         label += "  ← current"
                     choices.append(label)

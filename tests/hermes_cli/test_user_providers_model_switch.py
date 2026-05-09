@@ -5,7 +5,7 @@ are properly resolved for model switching and that their full ``models:`` lists
 are exposed in the model picker.
 """
 
-import pytest
+import sqlite3
 from hermes_cli.model_switch import list_authenticated_providers, switch_model
 from hermes_cli import runtime_provider as rp
 
@@ -244,6 +244,71 @@ def test_list_authenticated_providers_dict_models_dedupe_with_default(monkeypatc
     assert user_prov is not None
     assert user_prov["total_models"] == 3
     assert user_prov["models"].count("model-a") == 1
+
+
+def test_list_authenticated_providers_annotates_local_omniroute(monkeypatch, tmp_path):
+    """The OmniRoute-backed Hermes provider should show backend health in /model."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setenv("OMNIROUTE_DATA_DIR", str(tmp_path))
+
+    db = sqlite3.connect(tmp_path / "storage.sqlite")
+    db.execute(
+        """
+        CREATE TABLE provider_connections (
+            provider TEXT,
+            is_active INTEGER,
+            test_status TEXT,
+            last_error TEXT,
+            circuit_state TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    db.executemany(
+        """
+        INSERT INTO provider_connections
+            (provider, is_active, test_status, last_error, circuit_state, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("deepseek", 1, "active", "", "CLOSED", "2026-05-02T00:00:00Z"),
+            ("claude", 1, "active", "", "CLOSED", "2026-05-02T00:00:00Z"),
+            ("github", 1, "active", "", "CLOSED", "2026-05-02T00:00:00Z"),
+            ("gemini-cli", 1, "active", "", "CLOSED", "2026-05-02T00:00:00Z"),
+            ("codex", 1, "active", "", "CLOSED", "2026-05-02T00:00:00Z"),
+            ("cursor", 1, "unavailable", "Provider returned empty content", "CLOSED", "2026-05-02T00:00:00Z"),
+            ("opencode-go", 1, "unavailable", "Insufficient balance. Manage billing in OpenCode.", "CLOSED", "2026-05-02T00:00:00Z"),
+        ],
+    )
+    db.commit()
+    db.close()
+
+    providers = list_authenticated_providers(
+        current_provider="omni",
+        current_base_url="http://localhost:20128/v1",
+        user_providers={
+            "omni": {
+                "name": "omni",
+                "base_url": "http://localhost:20128/v1",
+            }
+        },
+        custom_providers=[],
+        max_models=50,
+    )
+
+    omni = next(p for p in providers if p["slug"] == "omni")
+
+    assert omni["models"] == [
+        "deepseek-v4-pro",
+        "cc/claude-sonnet-4-6",
+        "gh/gpt-5-mini",
+        "gemini-cli/gemini-2.5-flash",
+        "cx/gpt-5.4",
+    ]
+    assert "OK deepseek, claude, copilot, gemini-cli, codex" in omni["warning"]
+    assert "cursor (Provider returned empty content)" in omni["warning"]
+    assert "opencode-go (insufficient balance)" in omni["warning"]
 
 
 def test_openai_native_curated_catalog_is_non_empty():

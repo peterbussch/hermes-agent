@@ -21,8 +21,10 @@ OpenRouter variant suffixes (``:free``, ``:extended``, ``:fast``).
 from __future__ import annotations
 
 import logging
+import sqlite3
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, NamedTuple, Optional
 
 from hermes_cli.providers import (
@@ -44,6 +46,141 @@ from agent.models_dev import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_OMNIROUTE_PROVIDER_HINTS: tuple[tuple[str, str, str], ...] = (
+    ("deepseek-v4-pro", "deepseek", "deepseek"),
+    ("cc/claude-sonnet-4-6", "claude", "claude"),
+    ("gh/gpt-5-mini", "github", "copilot"),
+    ("gemini-cli/gemini-2.5-flash", "gemini-cli", "gemini-cli"),
+    ("cx/gpt-5.4", "codex", "codex"),
+    ("cu/default", "cursor", "cursor"),
+    ("opencode-go/kimi-k2.5", "opencode-go", "opencode-go"),
+)
+
+
+def _looks_like_omniroute_endpoint(slug: str, name: str, api_url: str) -> bool:
+    slug_l = str(slug or "").strip().lower()
+    name_l = str(name or "").strip().lower()
+    url_l = str(api_url or "").strip().rstrip("/").lower()
+    return (
+        slug_l == "omni"
+        or name_l == "omni"
+        or url_l in {"http://localhost:20128/v1", "http://127.0.0.1:20128/v1"}
+    )
+
+
+def _omniroute_db_path() -> Path:
+    import os
+
+    data_dir = (
+        os.environ.get("OMNIROUTE_DATA_DIR")
+        or os.environ.get("DATA_DIR")
+        or str(Path.home() / ".omniroute")
+    )
+    return Path(data_dir).expanduser() / "storage.sqlite"
+
+
+def _read_omniroute_provider_statuses() -> dict[str, dict]:
+    db_path = _omniroute_db_path()
+    if not db_path.exists():
+        return {}
+
+    rows: dict[str, dict] = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.5)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout=1500")
+            for row in conn.execute(
+                """
+                SELECT provider, is_active, test_status, last_error, circuit_state
+                FROM provider_connections
+                ORDER BY provider, updated_at DESC
+                """
+            ):
+                provider = str(row["provider"] or "").strip()
+                if provider and provider not in rows:
+                    rows[provider] = dict(row)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.debug("Failed to read OmniRoute provider status: %s", exc)
+        return {}
+    return rows
+
+
+def _compact_omniroute_error_reason(message: str) -> str:
+    reason = re.sub(r"\s+", " ", str(message or "")).strip()
+    if not reason:
+        return "unknown"
+    if "Insufficient balance" in reason:
+        return "insufficient balance"
+    if "Provider returned empty content" in reason:
+        return "Provider returned empty content"
+    reason = re.sub(r"https?://\S+", "", reason).strip(" .")
+    reason = re.sub(r"^\[[^\]]+\]\s*", "", reason).strip()
+    reason = re.sub(r"^\d{3}:\s*", "", reason).strip()
+    return reason[:60].rstrip() or "unknown"
+
+
+def _omniroute_status_reason(row: dict | None) -> tuple[bool, str]:
+    if not row:
+        return False, "no credentials"
+    if not row.get("is_active"):
+        return False, "inactive"
+    circuit_state = str(row.get("circuit_state") or "").strip().upper()
+    if circuit_state and circuit_state != "CLOSED":
+        return False, f"circuit {circuit_state.lower()}"
+    status = str(row.get("test_status") or "").strip().lower()
+    if status in {"active", "ok", "success", "healthy"}:
+        return True, ""
+    last_error = str(row.get("last_error") or "").strip()
+    if last_error:
+        return False, _compact_omniroute_error_reason(last_error)
+    return False, status or "unknown"
+
+
+def _omniroute_picker_status() -> tuple[list[str], str]:
+    statuses = _read_omniroute_provider_statuses()
+    if not statuses:
+        return [], ""
+
+    ok_models: list[str] = []
+    ok_labels: list[str] = []
+    blocked: list[str] = []
+
+    for model, provider, label in _OMNIROUTE_PROVIDER_HINTS:
+        ok, reason = _omniroute_status_reason(statuses.get(provider))
+        if ok:
+            ok_models.append(model)
+            ok_labels.append(label)
+        else:
+            blocked.append(f"{label} ({reason})")
+
+    parts = []
+    if ok_labels:
+        parts.append("OK " + ", ".join(ok_labels))
+    if blocked:
+        parts.append("blocked " + ", ".join(blocked))
+    return ok_models, "OmniRoute: " + "; ".join(parts) if parts else ""
+
+
+def _annotate_omniroute_provider(row: dict) -> None:
+    if not _looks_like_omniroute_endpoint(
+        str(row.get("slug") or ""),
+        str(row.get("name") or ""),
+        str(row.get("api_url") or ""),
+    ):
+        return
+
+    ok_models, warning = _omniroute_picker_status()
+    if ok_models and not row.get("models"):
+        row["models"] = ok_models
+        row["total_models"] = len(ok_models)
+    if warning:
+        existing = str(row.get("warning") or "").strip()
+        row["warning"] = f"{existing}; {warning}" if existing else warning
 
 
 # ---------------------------------------------------------------------------
@@ -1426,7 +1563,7 @@ def list_authenticated_providers(
                 except Exception:
                     pass
 
-            results.append({
+            row = {
                 "slug": ep_name,
                 "name": display_name,
                 "is_current": ep_name == current_provider,
@@ -1435,7 +1572,9 @@ def list_authenticated_providers(
                 "total_models": len(models_list) if models_list else 0,
                 "source": "user-config",
                 "api_url": api_url,
-            })
+            }
+            _annotate_omniroute_provider(row)
+            results.append(row)
             seen_slugs.add(ep_name.lower())
             seen_slugs.add(custom_provider_slug(display_name).lower())
             _pair = (
@@ -1569,7 +1708,7 @@ def list_authenticated_providers(
             _grp_url_norm = _pair_key[1]
             if _grp_url_norm and _grp_url_norm in _builtin_endpoints:
                 continue
-            results.append({
+            row = {
                 "slug": slug,
                 "name": grp["name"],
                 "is_current": slug == current_provider,
@@ -1578,7 +1717,9 @@ def list_authenticated_providers(
                 "total_models": len(grp["models"]),
                 "source": "user-config",
                 "api_url": grp["api_url"],
-            })
+            }
+            _annotate_omniroute_provider(row)
+            results.append(row)
             seen_slugs.add(slug.lower())
             _section4_emitted_slugs.add(slug.lower())
 
