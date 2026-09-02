@@ -17,19 +17,18 @@ Config keys this provider responds to::
       search_backend: "parallel"      # explicit per-capability
       extract_backend: "parallel"     # explicit per-capability
       backend: "parallel"             # shared fallback
-      # Optional: search mode (default "agentic"; also "fast" or "one-shot")
-      # via the PARALLEL_SEARCH_MODE env var.
+      # Optional explicit GA search mode: turbo|fast|basic|advanced.
+      parallel_search_mode: ""
 
 Env vars::
 
     PARALLEL_API_KEY=...             # https://parallel.ai (required)
-    PARALLEL_SEARCH_MODE=agentic     # optional: agentic|fast|one-shot
+    PARALLEL_SEARCH_MODE=agentic     # legacy compatibility input only
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, List
 
 from agent.web_search_provider import WebSearchProvider
@@ -136,12 +135,33 @@ _get_parallel_client = _get_sync_client
 _get_async_parallel_client = _get_async_client
 
 
-def _resolve_search_mode() -> str:
-    """Return the validated PARALLEL_SEARCH_MODE value (default "agentic")."""
-    mode = os.getenv("PARALLEL_SEARCH_MODE", "agentic").lower().strip()
-    if mode not in {"fast", "one-shot", "agentic"}:
-        mode = "agentic"
-    return mode
+def _resolve_search_mode(
+    configured_mode: str | None = None,
+    legacy_env_mode: str | None = None,
+) -> str:
+    """Resolve an explicit GA mode or migrate a legacy beta mode.
+
+    ``web.parallel_search_mode`` is authoritative when nonempty.  The legacy
+    environment input retains beta semantics, where ``fast`` meant today's
+    ``basic`` mode.  Unknown values fail closed to the historical agentic
+    behavior, represented by GA ``advanced``.
+    """
+    configured = (configured_mode or "").lower().strip()
+    if configured:
+        aliases = {"agentic": "advanced", "one-shot": "basic"}
+        accepted = {"turbo", "fast", "basic", "advanced", *aliases}
+        return (
+            aliases.get(configured, configured)
+            if configured in accepted
+            else "advanced"
+        )
+
+    legacy = (legacy_env_mode or "agentic").lower().strip()
+    return {
+        "fast": "basic",
+        "one-shot": "basic",
+        "agentic": "advanced",
+    }.get(legacy, "advanced")
 
 
 class ParallelWebSearchProvider(WebSearchProvider):
@@ -170,9 +190,10 @@ class ParallelWebSearchProvider(WebSearchProvider):
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Execute a Parallel search (sync).
 
-        Uses the ``beta.search`` endpoint with the configured mode
-        (``PARALLEL_SEARCH_MODE`` env var, default "agentic"). Limit is
-        capped at 20 server-side.
+        Uses the direct GA ``search`` endpoint.  An explicit
+        ``web.parallel_search_mode`` wins; otherwise the profile-scoped legacy
+        ``PARALLEL_SEARCH_MODE`` value is migrated to its GA equivalent.
+        Limit is capped at 20 server-side.
         """
         try:
             from tools.interrupt import is_interrupted
@@ -180,15 +201,25 @@ class ParallelWebSearchProvider(WebSearchProvider):
             if is_interrupted():
                 return {"success": False, "error": "Interrupted"}
 
-            mode = _resolve_search_mode()
+            import tools.web_tools as _wt
+
+            configured_mode = (
+                _wt._load_web_config().get("parallel_search_mode") or ""
+            )
+            legacy_env_mode = None
+            if not configured_mode.strip():
+                from agent.web_search_provider import get_provider_env
+
+                legacy_env_mode = get_provider_env("PARALLEL_SEARCH_MODE")
+            mode = _resolve_search_mode(configured_mode, legacy_env_mode)
             logger.info(
                 "Parallel search: '%s' (mode=%s, limit=%d)", query, mode, limit
             )
-            response = _get_sync_client().beta.search(
+            response = _get_sync_client().search(
                 search_queries=[query],
                 objective=query,
                 mode=mode,
-                max_results=min(limit, 20),
+                advanced_settings={"max_results": min(limit, 20)},
             )
 
             web_results = []
@@ -234,9 +265,9 @@ class ParallelWebSearchProvider(WebSearchProvider):
                 ]
 
             logger.info("Parallel extract: %d URL(s)", len(urls))
-            response = await _get_async_client().beta.extract(
+            response = await _get_async_client().extract(
                 urls=urls,
-                full_content=True,
+                advanced_settings={"full_content": True},
             )
 
             results: List[Dict[str, Any]] = []
