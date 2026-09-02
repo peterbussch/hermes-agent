@@ -272,6 +272,34 @@ PARALLEL_API_KEY=your-parallel-key-here
 
 在 [parallel.ai](https://parallel.ai) 申请访问权限。
 
+请在 `config.yaml` 中选择搜索模式。可用的 GA 值为 `turbo`、`fast`、
+`basic` 和 `advanced`：
+
+```yaml
+# ~/.hermes/config.yaml
+web:
+  search_backend: "parallel"
+  extract_backend: "parallel"
+  parallel_search_mode: "advanced"
+```
+
+非空的 `web.parallel_search_mode` 具有最高优先级。如果该值为空，Hermes
+会读取当前 profile 中旧的 `PARALLEL_SEARCH_MODE` 值，并在迁移时保留其原有
+含义：
+
+| 旧值 | GA 模式 |
+|------|---------|
+| `fast` | `basic` |
+| `one-shot` | `basic` |
+| `agentic` | `advanced` |
+
+如果两者都未设置，Hermes 使用 `advanced`。新配置应使用
+`web.parallel_search_mode`；`PARALLEL_SEARCH_MODE` 仅用于兼容旧配置，不应再
+加入 `.env`。只有机密值 `PARALLEL_API_KEY` 应保存在 `.env` 中。
+
+Parallel 适配器面向 `parallel-web` 1.3.3 GA 接口，直接调用
+`Parallel.search` 和 `AsyncParallel.extract`，不再使用已弃用的 beta API。
+
 ---
 
 ### xAI (Grok) {#xai-grok}
