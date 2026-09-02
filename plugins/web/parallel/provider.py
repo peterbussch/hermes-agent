@@ -28,18 +28,49 @@ Env vars::
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import secrets
+import threading
 from typing import Any, Dict, List
 
 from agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
+_CLIENT_CACHE_LOCK = threading.Lock()
+_CLIENT_CACHE_FINGERPRINT_KEY = secrets.token_bytes(32)
+
 # Module-level note: the canonical cache slots ``_parallel_client`` and
 # ``_async_parallel_client`` live on :mod:`tools.web_tools` so tests that do
 # ``tools.web_tools._parallel_client = None`` between cases see fresh state.
 # The plugin reads/writes through that public module (see
 # :func:`_get_sync_client` / :func:`_get_async_client`).
+
+
+def _credential_id(api_key: str) -> bytes:
+    """Return a process-local, non-reversible identity for one API key."""
+    return hashlib.blake2b(
+        api_key.encode("utf-8"),
+        digest_size=16,
+        key=_CLIENT_CACHE_FINGERPRINT_KEY,
+    ).digest()
+
+
+def _get_parallel_api_key() -> str:
+    """Resolve the active profile's API key without scoped fallback leakage."""
+    from agent import secret_scope
+
+    if (
+        secret_scope.current_secret_scope() is not None
+        or secret_scope.is_multiplex_active()
+    ):
+        return (secret_scope.get_secret("PARALLEL_API_KEY") or "").strip()
+
+    from agent.web_search_provider import get_provider_env
+
+    return get_provider_env("PARALLEL_API_KEY")
 
 
 def _ensure_parallel_sdk_installed() -> None:
@@ -68,25 +99,33 @@ def _get_sync_client() -> Any:
     """
     import tools.web_tools as _wt
 
-    cached = getattr(_wt, "_parallel_client", None)
-    if cached is not None:
-        return cached
-
-    from agent.web_search_provider import get_provider_env
-
-    api_key = get_provider_env("PARALLEL_API_KEY")
+    api_key = _get_parallel_api_key()
     if not api_key:
         raise ValueError(
             "PARALLEL_API_KEY environment variable not set. "
             "Get your API key at https://parallel.ai"
         )
 
-    _ensure_parallel_sdk_installed()
-    from parallel import Parallel  # noqa: WPS433 — deliberately lazy
+    credential_id = _credential_id(api_key)
+    with _CLIENT_CACHE_LOCK:
+        cached = getattr(_wt, "_parallel_client", None)
+        cached_credential_id = getattr(
+            _wt, "_parallel_client_credential_id", None
+        )
+        if (
+            cached is not None
+            and isinstance(cached_credential_id, bytes)
+            and hmac.compare_digest(cached_credential_id, credential_id)
+        ):
+            return cached
 
-    client = Parallel(api_key=api_key)
-    _wt._parallel_client = client
-    return client
+        _ensure_parallel_sdk_installed()
+        from parallel import Parallel  # noqa: WPS433 — deliberately lazy
+
+        client = Parallel(api_key=api_key)
+        _wt._parallel_client = client
+        _wt._parallel_client_credential_id = credential_id
+        return client
 
 
 def _get_async_client() -> Any:
@@ -96,25 +135,33 @@ def _get_async_client() -> Any:
     """
     import tools.web_tools as _wt
 
-    cached = getattr(_wt, "_async_parallel_client", None)
-    if cached is not None:
-        return cached
-
-    from agent.web_search_provider import get_provider_env
-
-    api_key = get_provider_env("PARALLEL_API_KEY")
+    api_key = _get_parallel_api_key()
     if not api_key:
         raise ValueError(
             "PARALLEL_API_KEY environment variable not set. "
             "Get your API key at https://parallel.ai"
         )
 
-    _ensure_parallel_sdk_installed()
-    from parallel import AsyncParallel  # noqa: WPS433 — deliberately lazy
+    credential_id = _credential_id(api_key)
+    with _CLIENT_CACHE_LOCK:
+        cached = getattr(_wt, "_async_parallel_client", None)
+        cached_credential_id = getattr(
+            _wt, "_async_parallel_client_credential_id", None
+        )
+        if (
+            cached is not None
+            and isinstance(cached_credential_id, bytes)
+            and hmac.compare_digest(cached_credential_id, credential_id)
+        ):
+            return cached
 
-    client = AsyncParallel(api_key=api_key)
-    _wt._async_parallel_client = client
-    return client
+        _ensure_parallel_sdk_installed()
+        from parallel import AsyncParallel  # noqa: WPS433 — deliberately lazy
+
+        client = AsyncParallel(api_key=api_key)
+        _wt._async_parallel_client = client
+        _wt._async_parallel_client_credential_id = credential_id
+        return client
 
 
 def _reset_clients_for_tests() -> None:
@@ -125,8 +172,11 @@ def _reset_clients_for_tests() -> None:
     """
     import tools.web_tools as _wt
 
-    _wt._parallel_client = None
-    _wt._async_parallel_client = None
+    with _CLIENT_CACHE_LOCK:
+        _wt._parallel_client = None
+        _wt._async_parallel_client = None
+        _wt._parallel_client_credential_id = None
+        _wt._async_parallel_client_credential_id = None
 
 
 # Backward-compatible aliases for the names that lived in tools.web_tools
@@ -177,9 +227,7 @@ class ParallelWebSearchProvider(WebSearchProvider):
 
     def is_available(self) -> bool:
         """Return True when ``PARALLEL_API_KEY`` is set to a non-empty value."""
-        from agent.web_search_provider import get_provider_env
-
-        return bool(get_provider_env("PARALLEL_API_KEY"))
+        return bool(_get_parallel_api_key())
 
     def supports_search(self) -> bool:
         return True

@@ -6,9 +6,11 @@ are replaced at the transport boundary so these tests cannot issue requests.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import parallel as parallel_sdk
 from parallel import AsyncParallel, Parallel
 from parallel.types import (
     ExtractError,
@@ -19,6 +21,7 @@ from parallel.types import (
 )
 
 from agent import web_search_provider
+from agent import secret_scope
 from hermes_cli.config import DEFAULT_CONFIG
 from plugins.web.parallel import provider
 from plugins.web.parallel.provider import (
@@ -26,6 +29,173 @@ from plugins.web.parallel.provider import (
     _resolve_search_mode,
 )
 from tools import web_tools
+
+
+@contextmanager
+def _secret_scope(secrets):
+    token = secret_scope.set_secret_scope(secrets)
+    try:
+        yield
+    finally:
+        secret_scope.reset_secret_scope(token)
+
+
+@pytest.fixture
+def isolated_parallel_client_cache(monkeypatch):
+    """Use real profile scopes with request-free recording SDK clients."""
+    original_multiplex = secret_scope.is_multiplex_active()
+    outer_scope = secret_scope.set_secret_scope(None)
+
+    class RecordingParallelClient:
+        instances = []
+
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.instances.append(self)
+
+    monkeypatch.setattr(parallel_sdk, "Parallel", RecordingParallelClient)
+    monkeypatch.setattr(parallel_sdk, "AsyncParallel", RecordingParallelClient)
+    monkeypatch.setattr(provider, "_ensure_parallel_sdk_installed", lambda: None)
+    monkeypatch.setenv("PARALLEL_API_KEY", "process-key-must-not-leak")
+    secret_scope.set_multiplex_active(True)
+    provider._reset_clients_for_tests()
+
+    yield RecordingParallelClient
+
+    provider._reset_clients_for_tests()
+    secret_scope.reset_secret_scope(outer_scope)
+    secret_scope.set_multiplex_active(original_multiplex)
+
+
+_CLIENT_CACHE_VARIANTS = [
+    ("_get_sync_client", "_parallel_client", "_parallel_client_credential_id"),
+    (
+        "_get_async_client",
+        "_async_parallel_client",
+        "_async_parallel_client_credential_id",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("getter_name", "client_slot", "identity_slot"), _CLIENT_CACHE_VARIANTS
+)
+def test_profile_switch_replaces_cached_client(
+    isolated_parallel_client_cache,
+    getter_name,
+    client_slot,
+    identity_slot,
+):
+    """Catch Profile B receiving Profile A's cached credential/client."""
+    getter = getattr(provider, getter_name)
+
+    with _secret_scope({"PARALLEL_API_KEY": "profile-a-key"}):
+        client_a = getter()
+    with _secret_scope({"PARALLEL_API_KEY": "profile-b-key"}):
+        client_b = getter()
+
+    assert client_a is not client_b
+    assert client_a.api_key == "profile-a-key"
+    assert client_b.api_key == "profile-b-key"
+    assert getattr(web_tools, client_slot) is client_b
+    assert getattr(web_tools, identity_slot) not in {
+        "profile-b-key",
+        b"profile-b-key",
+    }
+
+
+@pytest.mark.parametrize(
+    ("getter_name", "client_slot", "identity_slot"), _CLIENT_CACHE_VARIANTS
+)
+def test_empty_profile_scope_never_reuses_cached_client(
+    isolated_parallel_client_cache,
+    getter_name,
+    client_slot,
+    identity_slot,
+):
+    """Catch a keyless profile borrowing either cached or process-env credentials."""
+    getter = getattr(provider, getter_name)
+
+    with _secret_scope({"PARALLEL_API_KEY": "profile-a-key"}):
+        client_a = getter()
+    with _secret_scope({}):
+        with pytest.raises(ValueError, match="PARALLEL_API_KEY"):
+            getter()
+
+    assert client_a.api_key == "profile-a-key"
+    assert getattr(web_tools, client_slot) is client_a
+    assert getattr(web_tools, identity_slot) is not None
+
+
+@pytest.mark.parametrize(
+    ("getter_name", "client_slot", "identity_slot"), _CLIENT_CACHE_VARIANTS
+)
+def test_same_profile_credential_reuses_cached_client(
+    isolated_parallel_client_cache,
+    getter_name,
+    client_slot,
+    identity_slot,
+):
+    """Catch safe same-credential singleton reuse being discarded."""
+    getter = getattr(provider, getter_name)
+
+    with _secret_scope({"PARALLEL_API_KEY": "stable-profile-key"}):
+        first = getter()
+        second = getter()
+
+    assert first is second
+    assert getattr(web_tools, client_slot) is first
+    assert getattr(web_tools, identity_slot) is not None
+
+
+@pytest.mark.parametrize(
+    ("getter_name", "client_slot", "identity_slot"), _CLIENT_CACHE_VARIANTS
+)
+def test_rotated_profile_credential_replaces_cached_client(
+    isolated_parallel_client_cache,
+    getter_name,
+    client_slot,
+    identity_slot,
+):
+    """Catch an in-process credential rotation retaining the stale SDK client."""
+    getter = getattr(provider, getter_name)
+
+    with _secret_scope({"PARALLEL_API_KEY": "pre-rotation-key"}):
+        before = getter()
+    with _secret_scope({"PARALLEL_API_KEY": "post-rotation-key"}):
+        after = getter()
+
+    assert before is not after
+    assert before.api_key == "pre-rotation-key"
+    assert after.api_key == "post-rotation-key"
+    assert getattr(web_tools, client_slot) is after
+    assert getattr(web_tools, identity_slot) is not None
+
+
+def test_reset_clears_clients_and_credential_identities(isolated_parallel_client_cache):
+    """Catch the test/runtime reset leaving credential identity state behind."""
+    with _secret_scope({"PARALLEL_API_KEY": "profile-a-key"}):
+        provider._get_sync_client()
+        provider._get_async_client()
+
+    provider._reset_clients_for_tests()
+
+    assert web_tools._parallel_client is None
+    assert web_tools._async_parallel_client is None
+    assert web_tools._parallel_client_credential_id is None
+    assert web_tools._async_parallel_client_credential_id is None
+
+
+def test_availability_honors_authoritative_empty_profile_scope(
+    isolated_parallel_client_cache,
+):
+    """Catch provider discovery borrowing another profile's process-env key."""
+    parallel_provider = ParallelWebSearchProvider()
+
+    with _secret_scope({"PARALLEL_API_KEY": "profile-a-key"}):
+        assert parallel_provider.is_available() is True
+    with _secret_scope({}):
+        assert parallel_provider.is_available() is False
 
 
 @pytest.mark.parametrize(
