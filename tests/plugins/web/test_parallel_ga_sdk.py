@@ -230,6 +230,86 @@ def test_parallel_search_mode_default_cannot_mask_legacy_profiles():
     assert DEFAULT_CONFIG["web"]["parallel_search_mode"] == ""
 
 
+def test_scoped_mode_miss_ignores_conflicting_process_mode(
+    isolated_parallel_client_cache,
+    monkeypatch,
+):
+    """Catch a scoped mode miss borrowing another profile's process value."""
+    client = Mock(spec=Parallel)
+    client.search.return_value = SearchResult(
+        results=[],
+        search_id="search-test",
+        session_id="session-test",
+        usage=None,
+        warnings=None,
+    )
+    monkeypatch.setattr(provider, "_get_sync_client", lambda: client)
+    monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+    monkeypatch.setenv("PARALLEL_SEARCH_MODE", "fast")
+    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+
+    with _secret_scope({"PARALLEL_API_KEY": "profile-key-without-mode"}):
+        result = ParallelWebSearchProvider().search("scoped default query")
+
+    assert result == {"success": True, "data": {"web": []}}
+    assert client.search.call_args.kwargs["mode"] == "advanced"
+
+
+def test_scoped_legacy_mode_wins_over_conflicting_process_mode(
+    isolated_parallel_client_cache,
+    monkeypatch,
+):
+    """Catch a scoped legacy mode being ignored for the process value."""
+    client = Mock(spec=Parallel)
+    client.search.return_value = SearchResult(
+        results=[],
+        search_id="search-test",
+        session_id="session-test",
+        usage=None,
+        warnings=None,
+    )
+    monkeypatch.setattr(provider, "_get_sync_client", lambda: client)
+    monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+    monkeypatch.setenv("PARALLEL_SEARCH_MODE", "agentic")
+    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+
+    with _secret_scope({
+        "PARALLEL_API_KEY": "profile-key",
+        "PARALLEL_SEARCH_MODE": "fast",
+    }):
+        result = ParallelWebSearchProvider().search("scoped mode query")
+
+    assert result == {"success": True, "data": {"web": []}}
+    assert client.search.call_args.kwargs["mode"] == "basic"
+
+
+def test_unscoped_process_legacy_mode_remains_compatible(monkeypatch):
+    """Catch ordinary single-profile process-mode compatibility regressing."""
+    client = Mock(spec=Parallel)
+    client.search.return_value = SearchResult(
+        results=[],
+        search_id="search-test",
+        session_id="session-test",
+        usage=None,
+        warnings=None,
+    )
+    monkeypatch.setattr(provider, "_get_sync_client", lambda: client)
+    monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+    monkeypatch.setenv("PARALLEL_SEARCH_MODE", "fast")
+    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+    original_multiplex = secret_scope.is_multiplex_active()
+    outer_scope = secret_scope.set_secret_scope(None)
+    try:
+        secret_scope.set_multiplex_active(False)
+        result = ParallelWebSearchProvider().search("unscoped mode query")
+    finally:
+        secret_scope.reset_secret_scope(outer_scope)
+        secret_scope.set_multiplex_active(original_multiplex)
+
+    assert result == {"success": True, "data": {"web": []}}
+    assert client.search.call_args.kwargs["mode"] == "basic"
+
+
 def test_search_uses_ga_client_and_advanced_settings(monkeypatch):
     """Catch a beta call or max_results placed outside advanced_settings."""
     client = Mock(spec=Parallel)

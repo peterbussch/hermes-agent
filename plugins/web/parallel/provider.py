@@ -58,19 +58,24 @@ def _credential_id(api_key: str) -> bytes:
     ).digest()
 
 
-def _get_parallel_api_key() -> str:
-    """Resolve the active profile's API key without scoped fallback leakage."""
+def _get_parallel_env(name: str) -> str:
+    """Resolve one profile value without authoritative-scope fallback leakage."""
     from agent import secret_scope
 
     if (
         secret_scope.current_secret_scope() is not None
         or secret_scope.is_multiplex_active()
     ):
-        return (secret_scope.get_secret("PARALLEL_API_KEY") or "").strip()
+        return (secret_scope.get_secret(name) or "").strip()
 
     from agent.web_search_provider import get_provider_env
 
-    return get_provider_env("PARALLEL_API_KEY")
+    return get_provider_env(name)
+
+
+def _get_parallel_api_key() -> str:
+    """Resolve the active profile's API key."""
+    return _get_parallel_env("PARALLEL_API_KEY")
 
 
 def _ensure_parallel_sdk_installed() -> None:
@@ -256,9 +261,7 @@ class ParallelWebSearchProvider(WebSearchProvider):
             )
             legacy_env_mode = None
             if not configured_mode.strip():
-                from agent.web_search_provider import get_provider_env
-
-                legacy_env_mode = get_provider_env("PARALLEL_SEARCH_MODE")
+                legacy_env_mode = _get_parallel_env("PARALLEL_SEARCH_MODE")
             mode = _resolve_search_mode(configured_mode, legacy_env_mode)
             logger.info(
                 "Parallel search: '%s' (mode=%s, limit=%d)", query, mode, limit
