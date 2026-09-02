@@ -397,8 +397,9 @@ exclude-newer = "14 days"
 # cannot see upload dates.
 #
 # parallel-web: 1.3.3 is the first reviewed GA release and was published on
-# 2026-09-01, inside the global aging window. Its package-specific cutoff
-# admits that release without opening resolution to later uploads.
+# 2026-09-01, inside the global aging window. Its package-specific cutoff is
+# one second after the latest 1.3.3 artifact upload, so it admits that release
+# without opening resolution to a later upload. Remove after 2026-09-15.
 #
 # setuptools, pillow, mcp: exact-pinned bricks (#78227, #75992, #76020). uv
 # applies exclude-newer to build-system.requires and core deps too; when a
@@ -410,7 +411,7 @@ exclude-newer = "14 days"
 # cutoff can still brick installs. Exempting exact pins is pure brick-risk
 # removal at no supply-chain cost. Guarded by
 # tests/test_packaging_metadata.py::test_build_system_requires_exempt_from_exclude_newer.
-exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false, defusedxml = false, python-olm = false, unpaddedbase64 = false, setuptools = false, pillow = false, mcp = false, parallel-web = "2026-09-02T00:30:00Z" }
+exclude-newer-package = { vercel = false, nemo-relay = false, huggingface_hub = false, h2 = false, aiohttp = false, cryptography = false, defusedxml = false, python-olm = false, unpaddedbase64 = false, setuptools = false, pillow = false, mcp = false, parallel-web = "2026-09-01T00:26:00Z" }
 
 [tool.setuptools]
 # Top-level single-file modules (not packages). Without this, uv2nix's

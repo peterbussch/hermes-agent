@@ -23,7 +23,7 @@ aiohttp = false
 cryptography = false
 mcp = false
 python-olm = false
-parallel-web = "2026-09-02T00:30:00Z"
+parallel-web = "2026-09-01T00:26:00Z"
 nemo-relay = false
 
 [manifest]
