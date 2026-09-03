@@ -1366,7 +1366,7 @@ def skill_view(
         _outside_skills_dir = True
         _trusted_dirs = [active_skills_dir.resolve()]
         try:
-            _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
+            _trusted_dirs.extend(d.resolve() for d in get_external_skills_dirs())
         except Exception:
             pass
         for _td in _trusted_dirs:

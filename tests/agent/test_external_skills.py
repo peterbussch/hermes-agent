@@ -1,6 +1,7 @@
 """Tests for external skill directories (skills.external_dirs config)."""
 
 import json
+import logging
 import os
 from unittest.mock import patch
 
@@ -115,3 +116,25 @@ class TestExternalSkillView:
             result = json.loads(skill_view("my-external-skill"))
         assert result["success"] is True
         assert "external things" in result["content"]
+
+    def test_external_skill_is_trusted_when_local_skills_dir_is_absent(
+        self, hermes_home, external_skills_dir, caplog
+    ):
+        (hermes_home / "skills").rmdir()
+        (hermes_home / "config.yaml").write_text(
+            f"skills:\n  external_dirs:\n    - {external_skills_dir}\n"
+        )
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}),
+            patch("tools.skills_tool.SKILLS_DIR", hermes_home / "skills"),
+            caplog.at_level(logging.WARNING),
+        ):
+            from tools.skills_tool import skill_view
+
+            result = json.loads(skill_view("my-external-skill"))
+
+        assert result["success"] is True
+        assert not any(
+            "outside the trusted skills directory" in record.message
+            for record in caplog.records
+        )
