@@ -5,6 +5,8 @@ version: 1.0.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
+prerequisites:
+  commands: [python3]
 metadata:
   hermes:
     tags: [Research, Archives, Wayback, Paywall, WAF, Fallback]
@@ -34,8 +36,10 @@ Run it in one shot with the bundled script:
 python3 scripts/recover_page.py "https://example.com/blocked-article" --json
 ```
 
-The script tries each route in order, validates every body (see "Fake
-successes" below), and prints the first genuine hit with its provenance.
+The script automates routes 1–3, validates every body (see "Fake successes"
+below), and prints the first genuine hit with its provenance. Routes 4–5 are
+explicit recovery work after the automated archive/Jina ladder is exhausted;
+do not claim the script attempted them.
 
 ## Provenance discipline (non-negotiable)
 

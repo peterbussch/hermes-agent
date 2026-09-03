@@ -2,13 +2,13 @@
 """Search arXiv and display results in a clean format.
 
 Usage:
-    python search_arxiv.py "GRPO reinforcement learning"
-    python search_arxiv.py "GRPO reinforcement learning" --max 10
-    python search_arxiv.py "GRPO reinforcement learning" --sort date
-    python search_arxiv.py --author "Yann LeCun" --max 5
-    python search_arxiv.py --category cs.AI --sort date --max 10
-    python search_arxiv.py --id 2402.03300
-    python search_arxiv.py --id 2402.03300,2401.12345
+    python3 search_arxiv.py "GRPO reinforcement learning"
+    python3 search_arxiv.py "GRPO reinforcement learning" --max 10
+    python3 search_arxiv.py "GRPO reinforcement learning" --sort date
+    python3 search_arxiv.py --author "Yann LeCun" --max 5
+    python3 search_arxiv.py --category cs.AI --sort date --max 10
+    python3 search_arxiv.py --id 2402.03300
+    python3 search_arxiv.py --id 2402.03300,2401.12345
 """
 import sys
 import urllib.request
