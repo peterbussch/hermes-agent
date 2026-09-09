@@ -22,13 +22,13 @@ Usage in a tool module:
 """
 
 import datetime
-import json
 import logging
 import os
 import uuid
 from typing import Any, Dict
 
 from hermes_constants import get_hermes_home
+from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +82,7 @@ class DebugSession:
                 "total_calls": len(self._calls),
                 "tool_calls": self._calls,
             }
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
+            atomic_json_write(filepath, payload, mode=0o600)
             logger.debug("%s debug log saved: %s", self.tool_name, filepath)
         except Exception as e:
             logger.error("Error saving %s debug log: %s", self.tool_name, e)

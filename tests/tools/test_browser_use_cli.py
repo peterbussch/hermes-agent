@@ -42,7 +42,20 @@ class TestModeDetection:
         """Backend unset: Browser Use mode is the default when the CLI runs."""
         monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        monkeypatch.setattr(bu_cli, "_browser_use_readiness", lambda cmd: (True, None))
         assert bu_cli.is_browser_use_cli_mode() is True
+
+    def test_default_falls_back_when_cli_is_installed_but_not_operational(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        monkeypatch.setattr(
+            bu_cli,
+            "_browser_use_readiness",
+            lambda cmd: (False, "Chrome is not running"),
+        )
+        assert bu_cli.is_browser_use_cli_mode() is False
 
     def test_default_off_when_cli_unavailable(self, monkeypatch):
         """Backend unset + no runnable CLI: keep the built-in browser tools."""
@@ -788,6 +801,18 @@ class TestSkillTextDescription:
 
 
 class TestBrowserExec:
+    def test_local_backend_readiness_failure_is_actionable(self, tmp_path, monkeypatch):
+        cli = _fake_cli(tmp_path, 'echo "[FAIL] chrome running — start chrome"\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"backend": "browser-use"}},
+        )
+        result = json.loads(bu_cli.browser_exec("print(1)"))
+        assert result["success"] is False
+        assert result["error_type"] == "browser_backend_not_ready"
+        assert "Chrome" in result["error"]
+
     def test_missing_cli_returns_install_hint(self, monkeypatch):
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         result = json.loads(bu_cli.browser_exec("print(page_info())"))
@@ -828,6 +853,7 @@ class TestBrowserExec:
         assert result["exit_code"] == 3
         assert "boom" in result["stderr"]
 
+    @pytest.mark.live_system_guard_bypass
     def test_timeout_returns_actionable_error(self, tmp_path, monkeypatch):
         cli = _fake_cli(tmp_path, "cat > /dev/null\nsleep 30\n")
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
@@ -1028,7 +1054,21 @@ class TestDefaultDowngradeNotice:
     def test_no_notice_when_cli_runnable(self, tmp_path, monkeypatch):
         self._isolate(tmp_path, monkeypatch)
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        monkeypatch.setattr(bu_cli, "_browser_use_readiness", lambda cmd: (True, None))
         assert bu_cli.default_downgrade_notice() is None
+
+    def test_notice_when_cli_is_installed_but_unready(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/browser-use"])
+        monkeypatch.setattr(
+            bu_cli,
+            "_browser_use_readiness",
+            lambda cmd: (False, "chrome running — start chrome"),
+        )
+        notice = bu_cli.default_downgrade_notice()
+        assert notice is not None
+        assert "not ready" in notice
+        assert "chrome running" in notice
 
     def test_no_notice_on_explicit_backend(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))

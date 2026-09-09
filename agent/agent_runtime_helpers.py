@@ -3361,6 +3361,17 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     if normalized in agent.valid_tool_names:
         return normalized
 
+    # Semantic aliases must run before fuzzy matching. Gemini-family models
+    # commonly emit ``search_web`` for Hermes's ``web_search`` tool; difflib
+    # otherwise prefers the unrelated ``search_files`` name when that tool is
+    # also enabled, silently turning an internet query into a filesystem scan.
+    semantic_aliases = {
+        "search_web": "web_search",
+    }
+    aliased = semantic_aliases.get(normalized)
+    if aliased in agent.valid_tool_names:
+        return aliased
+
     # Build the full candidate set for class-like emissions.
     cands: set[str] = {tool_name, lowered, normalized, _camel_snake(tool_name)}
     # Strip trailing tool-suffix up to twice — TodoTool_tool needs it.

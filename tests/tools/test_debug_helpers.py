@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 from unittest.mock import patch
 
 from tools.debug_helpers import DebugSession
@@ -52,3 +53,4 @@ class TestDebugSessionEnabled:
         data = json.loads(files[0].read_text())
         assert data["total_calls"] == 0
         assert data["tool_calls"] == []
+        assert stat.S_IMODE(files[0].stat().st_mode) == 0o600

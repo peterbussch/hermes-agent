@@ -2185,8 +2185,15 @@ def warn_deprecated_cwd_env_vars(config: Optional[Dict[str, Any]] = None) -> Non
     These env vars are deprecated — the canonical setting is terminal.cwd
     in config.yaml.  Prints a migration hint to stderr.
     """
-    messaging_cwd = os.environ.get("MESSAGING_CWD")
-    terminal_cwd_env = os.environ.get("TERMINAL_CWD")
+    # Inspect the persisted .env rather than os.environ. Runtime config bridges
+    # intentionally export TERMINAL_CWD for tool consumers; treating that
+    # bridged value as deprecated user configuration produces a false warning.
+    try:
+        env_on_disk = load_env()
+    except Exception:
+        env_on_disk = {}
+    messaging_cwd = env_on_disk.get("MESSAGING_CWD")
+    terminal_cwd_env = env_on_disk.get("TERMINAL_CWD")
 
     if config is None:
         try:
@@ -2206,7 +2213,6 @@ def warn_deprecated_cwd_env_vars(config: Optional[Dict[str, Any]] = None) -> Non
             f"this is deprecated."
         )
     if terminal_cwd_env and not config_has_explicit_cwd:
-        # TERMINAL_CWD in env but not from config bridge — likely from .env
         lines.append(
             f"  \033[33m⚠\033[0m TERMINAL_CWD={terminal_cwd_env} found in .env — "
             f"this is deprecated."

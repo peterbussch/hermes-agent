@@ -37,7 +37,7 @@ SKILL.md Format (YAML Frontmatter, agentskills.io compatible):
     prerequisites:                # Optional — legacy runtime requirements
       env_vars: [API_KEY]         #   Legacy env var names are normalized into
                                   #   required_environment_variables on load.
-      commands: [curl, jq]        #   Command checks remain advisory only.
+      commands: [curl, jq]        #   Missing commands make the skill setup-needed.
     compatibility: Requires X     # Optional (agentskills.io)
     metadata:                     # Optional, arbitrary key-value (agentskills.io)
       hermes:
@@ -68,6 +68,7 @@ Usage:
 
 import json
 import logging
+import shutil
 import time
 import threading
 
@@ -290,6 +291,16 @@ def _collect_prerequisite_values(
         _normalize_prerequisite_values(prereqs.get("env_vars")),
         _normalize_prerequisite_values(prereqs.get("commands")),
     )
+
+
+def _missing_required_commands(commands: List[str]) -> List[str]:
+    """Return declared command prerequisites that are absent from execution PATH.
+
+    Command names are metadata, not shell fragments: ``shutil.which`` performs a
+    non-executing PATH lookup and avoids turning skill frontmatter into code.
+    Preserve declaration order so readiness output stays deterministic.
+    """
+    return [command for command in commands if shutil.which(command) is None]
 
 
 def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
@@ -1022,17 +1033,32 @@ def _serve_plugin_skill(
                 "Could not preprocess plugin skill %s:%s", namespace, bare, exc_info=True
             )
 
-    return json.dumps(
-        {
-            "success": True,
-            "name": f"{namespace}:{bare}",
-            "content": f"{banner}{rendered_content}" if banner else rendered_content,
-            "description": description,
-            "linked_files": _plugin_skill_linked_files(skill_md.parent),
-            "readiness_status": SkillReadinessStatus.AVAILABLE.value,
-        },
-        ensure_ascii=False,
-    )
+    _, required_commands = _collect_prerequisite_values(parsed_frontmatter)
+    missing_required_commands = _missing_required_commands(required_commands)
+    setup_needed = bool(missing_required_commands)
+    setup_note = _build_setup_note(
+        SkillReadinessStatus.SETUP_NEEDED,
+        [f"command {command}" for command in missing_required_commands],
+    ) if setup_needed else None
+
+    result = {
+        "success": True,
+        "name": f"{namespace}:{bare}",
+        "content": f"{banner}{rendered_content}" if banner else rendered_content,
+        "description": description,
+        "linked_files": _plugin_skill_linked_files(skill_md.parent),
+        "required_commands": required_commands,
+        "missing_required_commands": missing_required_commands,
+        "setup_needed": setup_needed,
+        "readiness_status": (
+            SkillReadinessStatus.SETUP_NEEDED.value
+            if setup_needed
+            else SkillReadinessStatus.AVAILABLE.value
+        ),
+    }
+    if setup_note:
+        result["setup_note"] = setup_note
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _plugin_skill_linked_files(skill_root: Path) -> Dict[str, List[str]] | None:
@@ -1614,10 +1640,11 @@ def skill_view(
         skill_name = frontmatter.get(
             "name", skill_md.stem if not skill_dir else skill_dir.name
         )
-        legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
+        legacy_env_vars, required_commands = _collect_prerequisite_values(frontmatter)
         required_env_vars = _get_required_environment_variables(
             frontmatter, legacy_env_vars
         )
+        missing_required_commands = _missing_required_commands(required_commands)
         backend = _get_terminal_backend_name()
         env_snapshot = load_env()
         missing_required_env_vars = [
@@ -1637,7 +1664,9 @@ def skill_view(
             capture_result,
             env_snapshot=env_snapshot,
         )
-        setup_needed = bool(remaining_missing_required_envs)
+        setup_needed = bool(
+            remaining_missing_required_envs or missing_required_commands
+        )
 
         # Register available skill env vars so they pass through to sandboxed
         # execution environments (execute_code, terminal).  Only vars that are
@@ -1777,10 +1806,10 @@ def skill_view(
             if linked_files
             else None,
             "required_environment_variables": required_env_vars,
-            "required_commands": [],
+            "required_commands": required_commands,
             "missing_required_environment_variables": remaining_missing_required_envs,
             "missing_credential_files": missing_cred_files,
-            "missing_required_commands": [],
+            "missing_required_commands": missing_required_commands,
             "setup_needed": setup_needed,
             "setup_skipped": capture_result["setup_skipped"],
             "readiness_status": SkillReadinessStatus.SETUP_NEEDED.value
@@ -1814,6 +1843,8 @@ def skill_view(
                 f"env ${env_name}" for env_name in remaining_missing_required_envs
             ] + [
                 f"file {path}" for path in missing_cred_files
+            ] + [
+                f"command {command}" for command in missing_required_commands
             ]
             setup_note = _build_setup_note(
                 SkillReadinessStatus.SETUP_NEEDED,

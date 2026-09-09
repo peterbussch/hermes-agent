@@ -9,12 +9,13 @@ Covers:
 - delegate_task return-shape: live_transcripts in sync + background dispatch
 """
 
+import hashlib
 import json
 import os
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +28,7 @@ from tools.delegation_live_log import (
     update_manifest_statuses,
     wrap_progress_callback,
 )
+from tools.delegate_tool import delegate_task
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,39 @@ def test_wrap_progress_callback_writer_failure_does_not_block_inner():
 # ---------------------------------------------------------------------------
 
 
+def test_manifest_is_self_describing_and_hashes_live_artifacts():
+    delegation_id, writers, paths = create_live_transcripts(
+        [{"goal": "collect primary sources"}]
+    )
+    run_directory = live_transcript_root() / delegation_id
+    manifest_path = run_directory / "manifest.json"
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == 1
+    assert manifest["run_directory"] == str(run_directory)
+    assert manifest["manifest_path"] == str(manifest_path)
+    assert manifest["artifacts"] == [
+        {
+            "type": "live_transcript",
+            "task_index": 0,
+            "path": paths[0],
+            "sha256": hashlib.sha256(Path(paths[0]).read_bytes()).hexdigest(),
+            "size_bytes": Path(paths[0]).stat().st_size,
+        }
+    ]
+
+    writers[0].marker("new final content")
+    update_manifest_statuses(
+        delegation_id,
+        [{"task_index": 0, "status": "completed", "exit_reason": "completed"}],
+    )
+    refreshed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert refreshed["artifacts"][0]["sha256"] == hashlib.sha256(
+        Path(paths[0]).read_bytes()
+    ).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # delegate_task return-shape integration
 # ---------------------------------------------------------------------------
@@ -167,6 +202,37 @@ def _fake_run(task_index, goal, child=None, parent_agent=None, **kw):
         "summary": f"done: {goal}", "api_calls": 1,
         "duration_seconds": 0.1, "model": "m", "exit_reason": "completed",
     }
+
+
+def test_sync_result_includes_live_run_pointers(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    child = MagicMock(tool_progress_callback=None)
+    child._delegate_output_schema = None
+
+    with (
+        patch("tools.delegate_tool._load_config", return_value={}),
+        patch(
+            "tools.delegate_tool._resolve_delegation_credentials",
+            return_value=_CREDS,
+        ),
+        patch(
+            "tools.delegate_tool._build_child_preserving_parent_tools",
+            return_value=child,
+        ),
+        patch("tools.delegate_tool._run_single_child", side_effect=_fake_run),
+    ):
+        payload = json.loads(
+            delegate_task(goal="collect primary sources", parent_agent=_make_parent())
+        )
+
+    manifest_path = Path(payload["manifest_path"])
+    assert payload["delegation_id"].startswith("deleg_")
+    assert payload["run_directory"] == str(manifest_path.parent)
+    assert manifest_path.is_file()
+    result = payload["results"][0]
+    assert result["delegation_id"] == payload["delegation_id"]
+    assert result["run_directory"] == payload["run_directory"]
+    assert result["manifest_path"] == payload["manifest_path"]
 
 
 if __name__ == "__main__":

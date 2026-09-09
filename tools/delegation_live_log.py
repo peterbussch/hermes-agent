@@ -29,6 +29,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -350,11 +351,53 @@ def _manifest_path(delegation_id: str) -> Path:
     return live_transcript_root() / delegation_id / "manifest.json"
 
 
+def live_run_pointers(delegation_id: Optional[str]) -> Dict[str, str]:
+    """Stable paths callers can use to recover a delegation run."""
+    if not delegation_id:
+        return {}
+    manifest_path = _manifest_path(delegation_id)
+    return {
+        "delegation_id": delegation_id,
+        "run_directory": str(manifest_path.parent),
+        "manifest_path": str(manifest_path),
+    }
+
+
+def _live_artifact(path: str, task_index: int) -> Dict[str, Any]:
+    """Describe one transcript with a content hash for integrity checks."""
+    artifact_path = Path(path)
+    digest = hashlib.sha256()
+    with artifact_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "type": "live_transcript",
+        "task_index": task_index,
+        "path": str(artifact_path),
+        "sha256": digest.hexdigest(),
+        "size_bytes": artifact_path.stat().st_size,
+    }
+
+
+def _live_artifacts(paths: List[str]) -> List[Dict[str, Any]]:
+    artifacts: List[Dict[str, Any]] = []
+    for task_index, path in enumerate(paths):
+        try:
+            artifacts.append(_live_artifact(path, task_index))
+        except OSError as exc:
+            logger.debug("Live transcript artifact hashing failed (%s): %s", path, exc)
+    return artifacts
+
+
 def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                     paths: List[str]) -> None:
     try:
+        pointers = live_run_pointers(delegation_id)
         manifest = {
+            "schema_version": 1,
             "delegation_id": delegation_id,
+            "run_directory": pointers["run_directory"],
+            "manifest_path": pointers["manifest_path"],
             "started": time.strftime("%Y-%m-%d %H:%M:%S"),
             "task_count": len(task_list),
             "tasks": [
@@ -371,6 +414,7 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 }
                 for i, t in enumerate(task_list)
             ],
+            "artifacts": _live_artifacts(paths),
         }
         _manifest_path(delegation_id).write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -394,6 +438,13 @@ def update_manifest_statuses(delegation_id: Optional[str],
                 task["status"] = r.get("status", task.get("status"))
                 if r.get("exit_reason"):
                     task["exit_reason"] = r["exit_reason"]
+        manifest["artifacts"] = _live_artifacts(
+            [
+                task["log"]
+                for task in manifest.get("tasks", [])
+                if isinstance(task.get("log"), str) and task["log"]
+            ]
+        )
         manifest["completed"] = time.strftime("%Y-%m-%d %H:%M:%S")
         mp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
                       encoding="utf-8")

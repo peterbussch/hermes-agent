@@ -50,6 +50,11 @@ class TestExistingBehaviorStillWorks:
     def test_lowercase_already_matches(self, repair):
         assert repair("browser_click") == "browser_click"
 
+    def test_search_web_alias_prefers_web_search(self, repair):
+        """Gemini's semantic alias must not fuzzy-match to search_files."""
+        repair.__self__.valid_tool_names = VALID | {"search_files"}
+        assert repair("search_web") == "web_search"
+
 
 
 

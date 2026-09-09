@@ -64,6 +64,7 @@ class _StubChild:
         self._api_call_count = api_call_count
         self._hang = threading.Event()
         self._hang_seconds = hang_seconds
+        self.run_calls = 0
 
     def get_activity_summary(self):
         return {
@@ -74,6 +75,7 @@ class _StubChild:
         }
 
     def run_conversation(self, user_message, task_id=None, stream_callback=None):
+        self.run_calls += 1
         self._hang.wait(self._hang_seconds)
         return {"final_response": "", "completed": False, "api_calls": self._api_call_count}
 
@@ -210,6 +212,37 @@ class TestRunSingleChildTimeoutDump:
         assert "without making any API call" in result["error"]
         assert "Diagnostic:" in result["error"]
         assert str(dump_path) in result["error"]
+
+    def test_progressed_timeout_returns_deterministic_partial_salvage(
+        self, hermes_home, monkeypatch
+    ):
+        child = _StubChild(api_call_count=3, hang_seconds=10.0)
+        live_path = (
+            hermes_home
+            / "cache"
+            / "delegation"
+            / "live"
+            / "deleg_x"
+            / "task-0.log"
+        )
+        child._live_transcript_path = str(live_path)
+
+        result = self._invoke_with_short_timeout(child, monkeypatch)
+
+        assert result["status"] == "timeout"
+        assert result["summary"] == (
+            "Partial subagent progress is available after 3 API calls. "
+            f"Recover it from the live transcript: {live_path}"
+        )
+        assert result["partial"] is True
+        assert result["partial_salvage"] == {
+            "status": "available",
+            "reason": "timeout_after_progress",
+            "api_calls_completed": 3,
+            "artifact_paths": [str(live_path)],
+            "requires_synthesis": True,
+        }
+        assert child.run_calls == 1
 
 
     # ── explicit timeout metadata (#51690, salvaged from PR #60378) ────

@@ -194,6 +194,33 @@ def _run(child):
 
 
 class TestRunSingleChildSchemaValidation:
+    def test_guardrail_halt_is_failed_and_preserves_child_metadata(self):
+        child = _StubChild(["guardrail stopped repeated searches"])
+        guardrail = {
+            "action": "halt",
+            "code": "loop_web_search_cap",
+            "tool_name": "web_search",
+        }
+
+        def halted(user_message, task_id=None, **_kw):
+            child.calls.append(user_message)
+            return {
+                "final_response": "guardrail stopped repeated searches",
+                "completed": True,
+                "api_calls": 4,
+                "messages": [],
+                "turn_exit_reason": "guardrail_halt",
+                "guardrail": guardrail,
+            }
+
+        child.run_conversation = halted
+        entry = _run(child)
+
+        assert entry["status"] == "failed"
+        assert entry["exit_reason"] == "guardrail_halt"
+        assert entry["turn_exit_reason"] == "guardrail_halt"
+        assert entry["guardrail"] == guardrail
+
     def test_valid_first_try_no_retry(self):
         child = _StubChild(['{"city": "Berlin"}'])
         child._delegate_output_schema = ADDRESS_SCHEMA
@@ -215,10 +242,50 @@ class TestRunSingleChildSchemaValidation:
         # final summary is the retried (valid) answer
         assert json.loads(entry["summary"])["city"] == "Oslo"
 
+    def test_schema_retry_guardrail_preserves_retry_terminal_metadata(self):
+        child = _StubChild([])
+        child._delegate_output_schema = ADDRESS_SCHEMA
+        guardrail = {
+            "action": "halt",
+            "code": "loop_web_search_cap",
+            "tool_name": "web_search",
+        }
+        responses = [
+            {
+                "final_response": "not json",
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+                "turn_exit_reason": "text_response(stop)",
+            },
+            {
+                "final_response": "still not json",
+                "completed": True,
+                "api_calls": 1,
+                "messages": [],
+                "turn_exit_reason": "guardrail_halt",
+                "guardrail": guardrail,
+            },
+        ]
+
+        def sequence(user_message, task_id=None, **_kw):
+            child.calls.append(user_message)
+            return responses.pop(0)
+
+        child.run_conversation = sequence
+        entry = _run(child)
+
+        assert entry["status"] == "failed"
+        assert entry["exit_reason"] == "guardrail_halt"
+        assert entry["turn_exit_reason"] == "guardrail_halt"
+        assert entry["guardrail"] == guardrail
+
     def test_invalid_twice_surfaces_errors_and_stops(self):
         child = _StubChild(["nope", "still nope"])
         child._delegate_output_schema = ADDRESS_SCHEMA
         entry = _run(child)
+        assert entry["status"] == "failed"
+        assert entry["exit_reason"] == "schema_validation_failed"
         assert entry["schema_valid"] is False
         assert entry["schema_errors"]
         assert entry["schema_retries"] == 1

@@ -2722,10 +2722,36 @@ def _run_single_child(
             else:
                 _err = str(_timeout_exc)
 
+            _partial_summary: Optional[str] = None
+            _partial_salvage: Optional[Dict[str, Any]] = None
+            if is_timeout and child_api_calls > 0:
+                _live_transcript = getattr(child, "_live_transcript_path", None)
+                _artifact_paths = (
+                    [_live_transcript]
+                    if isinstance(_live_transcript, str) and _live_transcript
+                    else []
+                )
+                _partial_salvage = {
+                    "status": "available",
+                    "reason": "timeout_after_progress",
+                    "api_calls_completed": child_api_calls,
+                    "artifact_paths": _artifact_paths,
+                    "requires_synthesis": True,
+                }
+                _partial_summary = (
+                    f"Partial subagent progress is available after "
+                    f"{child_api_calls} API calls."
+                )
+                if _artifact_paths:
+                    _partial_summary += (
+                        " Recover it from the live transcript: "
+                        f"{_artifact_paths[0]}"
+                    )
+
             _error_entry = {
                 "task_index": task_index,
                 "status": "timeout" if is_timeout else "error",
-                "summary": None,
+                "summary": _partial_summary,
                 "error": _err,
                 "exit_reason": "timeout" if is_timeout else "error",
                 "api_calls": child_api_calls,
@@ -2740,6 +2766,9 @@ def _run_single_child(
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
             }
+            if _partial_salvage is not None:
+                _error_entry["partial"] = True
+                _error_entry["partial_salvage"] = _partial_salvage
             if _late_pending_steer:
                 _error_entry["missed_steer"] = _late_pending_steer
                 _error_entry["error"] += (
@@ -2799,6 +2828,16 @@ def _run_single_child(
                     _retry_text = _retry_result.get("final_response") or ""
                     if _retry_text.strip():
                         result["final_response"] = _retry_text
+                    for terminal_key in (
+                        "completed",
+                        "interrupted",
+                        "failed",
+                        "turn_exit_reason",
+                        "guardrail",
+                        "error",
+                    ):
+                        if terminal_key in _retry_result:
+                            result[terminal_key] = _retry_result[terminal_key]
                     try:
                         result["api_calls"] = int(
                             result.get("api_calls", 0) or 0
@@ -2842,6 +2881,14 @@ def _run_single_child(
         completed = result.get("completed", False)
         interrupted = result.get("interrupted", False)
         api_calls = result.get("api_calls", 0)
+        turn_exit_reason = result.get("turn_exit_reason")
+        guardrail = result.get("guardrail")
+        guardrail_halted = turn_exit_reason == "guardrail_halt"
+        schema_invalid_after_retry = bool(
+            isinstance(_output_schema, dict)
+            and _schema_retries
+            and not _schema_valid
+        )
 
         # The child emits the literal "(empty)" sentinel (see run_agent.py) when
         # it gives up after repeated empty-LLM-response retries — typically a
@@ -2852,6 +2899,8 @@ def _run_single_child(
 
         if interrupted:
             status = "interrupted"
+        elif guardrail_halted or schema_invalid_after_retry:
+            status = "failed"
         elif summary and not _empty_sentinel:
             # A summary means the subagent produced usable output.
             # exit_reason ("completed" vs "max_iterations") already
@@ -2901,6 +2950,10 @@ def _run_single_child(
         # Determine exit reason
         if interrupted:
             exit_reason = "interrupted"
+        elif guardrail_halted:
+            exit_reason = "guardrail_halt"
+        elif schema_invalid_after_retry:
+            exit_reason = "schema_validation_failed"
         elif completed:
             exit_reason = "completed"
         else:
@@ -2964,8 +3017,20 @@ def _run_single_child(
             _cost_status if isinstance(_cost_status, str) and _cost_status
             else "unknown"
         )
+        if isinstance(turn_exit_reason, str) and turn_exit_reason:
+            entry["turn_exit_reason"] = turn_exit_reason
+        if isinstance(guardrail, dict):
+            entry["guardrail"] = guardrail
         if status == "failed":
-            entry["error"] = result.get("error", "Subagent did not produce a response.")
+            if guardrail_halted:
+                default_error = "Subagent halted by a tool-call guardrail."
+            elif schema_invalid_after_retry:
+                default_error = (
+                    "Subagent output did not satisfy output_schema after one retry."
+                )
+            else:
+                default_error = "Subagent did not produce a response."
+            entry["error"] = result.get("error", default_error)
 
         # T1-24: schema-validation outcome — emitted ONLY when a schema was
         # requested, so legacy (schema-less) payloads keep their exact shape.
@@ -3621,6 +3686,7 @@ def delegate_task(
     # live_paths is empty and delegation proceeds exactly as before.
     from tools.delegation_live_log import (
         create_live_transcripts,
+        live_run_pointers,
         update_manifest_statuses,
         wrap_progress_callback,
     )
@@ -3628,6 +3694,7 @@ def delegate_task(
     live_deleg_id, live_writers, live_paths = create_live_transcripts(
         task_list, context
     )
+    live_pointers = live_run_pointers(live_deleg_id)
 
     # Capture the ORIGINATING session's wake target BEFORE any child agent is
     # constructed: _build_child_agent() -> AIAgent() -> agent_init calls
@@ -3889,6 +3956,16 @@ def delegate_task(
                     logger.debug("Live transcript finalize failed", exc_info=True)
                 if _idx < len(live_paths):
                     entry["live_transcript"] = live_paths[_idx]
+            if live_pointers:
+                entry.update(live_pointers)
+                partial_salvage = entry.get("partial_salvage")
+                if isinstance(partial_salvage, dict):
+                    partial_salvage.update(
+                        {
+                            "run_directory": live_pointers["run_directory"],
+                            "manifest_path": live_pointers["manifest_path"],
+                        }
+                    )
         update_manifest_statuses(live_deleg_id, results)
 
         combined: Dict[str, Any] = {
@@ -3897,6 +3974,8 @@ def delegate_task(
         }
         if live_paths:
             combined["live_transcripts"] = list(live_paths)
+        if live_pointers:
+            combined.update(live_pointers)
         return combined
 
     # ----- Background dispatch: run the WHOLE batch as one async unit -----
@@ -4126,6 +4205,8 @@ def delegate_task(
                     "task). Read or `tail -f` these paths at any time to watch "
                     "a child work while it runs."
                 )
+            if live_pointers:
+                payload.update(live_pointers)
             return json.dumps(payload, ensure_ascii=False)
 
         # Pool at capacity / schedule failure — children are still attached

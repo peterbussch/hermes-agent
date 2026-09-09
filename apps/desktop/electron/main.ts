@@ -684,10 +684,13 @@ function pathWithHermesManagedNode(...entries) {
   return [...managed, ...entries, process.env.PATH].filter(Boolean).join(path.delimiter)
 }
 
-// ACTIVE_HERMES_ROOT — the canonical mutable Hermes install. Same path
-// install.ps1 / install.sh use, so a desktop-only user and a CLI-only user end
-// up with identical layouts and can share one install.
-const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'hermes-agent')
+// ACTIVE_HERMES_ROOT — the canonical mutable Hermes install. Deployments may
+// pin an existing checkout; the portable default remains the install.sh layout.
+function resolveActiveHermesRoot(hermesHome: string, overrideRoot = process.env.HERMES_DESKTOP_HERMES_ROOT): string {
+  return overrideRoot ? path.resolve(overrideRoot) : path.join(hermesHome, 'hermes-agent')
+}
+
+const ACTIVE_HERMES_ROOT = resolveActiveHermesRoot(HERMES_HOME)
 // VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
 const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner

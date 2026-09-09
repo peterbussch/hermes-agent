@@ -76,6 +76,8 @@ _DEFAULT_TIMEOUT_S = 300
 _MIN_TIMEOUT_S = 5
 _MAX_TIMEOUT_S = 1800
 _STDERR_CAP_CHARS = 4000
+_READINESS_CACHE_TTL_S = 30.0
+_READINESS_CACHE: Dict[Tuple[str, ...], Tuple[float, bool, Optional[str]]] = {}
 
 # Filesystem-safe task ids for per-task workspace dirs.
 _TASK_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -198,7 +200,11 @@ def is_browser_use_cli_mode() -> bool:
         return True
     # Default (backend unset): Browser Use mode when the CLI can run at all;
     # otherwise keep the built-in tools so browsing never silently breaks.
-    return _find_cli() is not None
+    cmd = _find_cli()
+    if cmd is None:
+        return False
+    ready, _ = _browser_use_readiness(cmd)
+    return ready
 
 
 _NOTICE_STAMP_NAME = ".browser_use_default_notice"
@@ -223,8 +229,12 @@ def default_downgrade_notice() -> Optional[str]:
                 return None
         except Exception:
             pass
-        if _find_cli() is not None:
-            return None
+        cmd = _find_cli()
+        readiness_error = None
+        if cmd is not None:
+            ready, readiness_error = _browser_use_readiness(cmd)
+            if ready:
+                return None
 
         from hermes_constants import get_hermes_home
 
@@ -239,10 +249,17 @@ def default_downgrade_notice() -> Optional[str]:
             stamp.touch()
         except OSError:
             pass
+        if cmd is None:
+            return (
+                "Browser Use CLI not found — using the built-in browser tools. "
+                "Run `hermes tools` (Browser Automation → Browser Use) to install it, "
+                "or `browser.backend: off` in config.yaml to silence this."
+            )
         return (
-            "Browser Use CLI not found — using the built-in browser tools. "
-            "Run `hermes tools` (Browser Automation → Browser Use) to install it, "
-            "or `browser.backend: off` in config.yaml to silence this."
+            "Browser Use is installed but not ready, so Hermes is using the "
+            f"built-in browser tools: {readiness_error}. Run `browser-use "
+            "--doctor` after starting Chrome, or choose another backend in "
+            "`hermes tools`."
         )
     except Exception as e:  # pragma: no cover — a notice must never break startup
         logger.debug("browser-use downgrade notice failed: %s", e)
@@ -302,6 +319,57 @@ def _find_cli() -> Optional[List[str]]:
             if uvx:
                 return [uvx, "browser-use"]
     return None
+
+
+def _browser_use_readiness(
+    cmd: List[str], *, refresh: bool = False
+) -> Tuple[bool, Optional[str]]:
+    """Return operational readiness, not merely executable availability.
+
+    ``browser-use --doctor`` exits zero even when required local components
+    are unavailable, so readiness is derived from its typed ``[FAIL]`` lines.
+    Optional cloud authentication does not block a local setup. The short
+    cache keeps tool-registry rendering from spawning a process repeatedly.
+    """
+    key = tuple(cmd)
+    cached = _READINESS_CACHE.get(key)
+    now = time.monotonic()
+    if cached and not refresh and now - cached[0] < _READINESS_CACHE_TTL_S:
+        return cached[1], cached[2]
+
+    try:
+        proc = subprocess.run(
+            [*cmd, "--doctor"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+        output = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+        required_failures = [
+            line.strip()
+            for line in output.splitlines()
+            if "[FAIL]" in line and "optional" not in line.lower()
+        ]
+        if required_failures:
+            detail = required_failures[0].split("[FAIL]", 1)[-1].strip()
+            result = (False, detail or "Browser Use doctor reported a failure")
+        elif proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            result = (
+                False,
+                detail[-1] if detail else f"Browser Use doctor exited {proc.returncode}",
+            )
+        else:
+            result = (True, None)
+    except subprocess.TimeoutExpired:
+        result = (False, "Browser Use readiness check timed out")
+    except OSError as exc:
+        result = (False, f"Browser Use readiness check could not run: {exc}")
+
+    _READINESS_CACHE[key] = (now, result[0], result[1])
+    return result
 
 
 def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
@@ -590,6 +658,27 @@ def browser_exec(
     backend_err = _resolve_backend_cdp(env, task_id, session_name=session)
     if backend_err:
         return tool_error(backend_err)
+
+    # An explicit Browser Use selection must fail clearly when its local
+    # runtime is not operational. Default/unset selection is handled earlier
+    # by ``is_browser_use_cli_mode`` and falls back to built-in browser tools.
+    # A resolved CDP endpoint or cloud autospawn is independently ready and
+    # must not be rejected merely because local Chrome is stopped.
+    if (
+        get_browser_backend() == _BACKEND_KEY
+        and not env.get("BU_CDP_URL")
+        and not env.get("BU_CDP_WS")
+        and not env.get("BU_AUTOSPAWN")
+    ):
+        ready, readiness_error = _browser_use_readiness(cmd)
+        if not ready:
+            return tool_error(
+                "Browser Use is installed but its local backend is not ready: "
+                f"{readiness_error}. Start Chrome with remote debugging and "
+                "run `browser-use --doctor`, or switch to the built-in browser backend.",
+                success=False,
+                error_type="browser_backend_not_ready",
+            )
 
     # On a SHARED browser (local Chrome / CDP override) a fresh named daemon
     # attaches to the first existing page — the same page a sibling daemon

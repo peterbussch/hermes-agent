@@ -612,6 +612,50 @@ class TestFindAllSkillsSecureSetup:
 
 
 class TestSkillViewPrerequisites:
+    def test_missing_command_is_reported_as_setup_needed(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            skills_tool_module.shutil,
+            "which",
+            lambda command: None if command == "xurl" else f"/usr/bin/{command}",
+        )
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "x-search",
+                frontmatter_extra="prerequisites:\n  commands: [xurl]\n",
+            )
+            raw = skill_view("x-search")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["required_commands"] == ["xurl"]
+        assert result["missing_required_commands"] == ["xurl"]
+        assert result["setup_needed"] is True
+        assert result["readiness_status"] == "setup_needed"
+        assert "command xurl" in result["setup_note"]
+
+    def test_present_commands_leave_skill_available(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            skills_tool_module.shutil,
+            "which",
+            lambda command: f"/usr/local/bin/{command}",
+        )
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "ready-cli",
+                frontmatter_extra="prerequisites:\n  commands: [jq, curl]\n",
+            )
+            raw = skill_view("ready-cli")
+
+        result = json.loads(raw)
+        assert result["required_commands"] == ["jq", "curl"]
+        assert result["missing_required_commands"] == []
+        assert result["setup_needed"] is False
+        assert result["readiness_status"] == "available"
+
     def test_legacy_prerequisites_expose_required_env_setup_metadata(
         self, tmp_path, monkeypatch
     ):

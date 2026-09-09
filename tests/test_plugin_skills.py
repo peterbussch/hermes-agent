@@ -203,6 +203,28 @@ class TestSkillViewQualifiedName:
         assert result["name"] == "superpowers:writing-plans"
         assert "writing-plans body." in result["content"]
 
+    def test_plugin_skill_reports_missing_command_prerequisite(
+        self, tmp_path, monkeypatch
+    ):
+        from tools import skills_tool
+        from tools.skills_tool import skill_view
+
+        monkeypatch.setattr(skills_tool.shutil, "which", lambda command: None)
+        self._register_skill(
+            tmp_path,
+            content=(
+                "---\nname: writing-plans\ndescription: desc\n"
+                "prerequisites:\n  commands: [xurl]\n---\nBody.\n"
+            ),
+        )
+        result = json.loads(skill_view("superpowers:writing-plans"))
+
+        assert result["required_commands"] == ["xurl"]
+        assert result["missing_required_commands"] == ["xurl"]
+        assert result["setup_needed"] is True
+        assert result["readiness_status"] == "setup_needed"
+        assert "command xurl" in result["setup_note"]
+
     def test_reads_supporting_file_with_containment(self, tmp_path):
         from tools.skills_tool import skill_view
 
