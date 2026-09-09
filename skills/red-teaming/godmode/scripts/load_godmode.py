@@ -5,7 +5,7 @@ Usage in execute_code:
     exec(open(os.path.expanduser(
         os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), "skills/red-teaming/godmode/scripts/load_godmode.py")
     )).read())
-    
+
     # Now all functions are available:
     # - auto_jailbreak(), undo_jailbreak()
     # - race_models(), race_godmode_classic()

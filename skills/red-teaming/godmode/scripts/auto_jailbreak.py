@@ -9,7 +9,7 @@ Usage in execute_code:
     exec(open(os.path.expanduser(
         os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), "skills/red-teaming/godmode/scripts/auto_jailbreak.py")
     )).read())
-    
+
     result = auto_jailbreak()  # Uses current model from config
     # or:
     result = auto_jailbreak(model="anthropic/claude-sonnet-4")
@@ -420,12 +420,12 @@ def _write_prefill(prefill_messages: list):
 def auto_jailbreak(model=None, base_url=None, api_key=None,
                    canary=None, dry_run=False, verbose=True):
     """Auto-jailbreak pipeline.
-    
+
     1. Detects model family
     2. Tries strategies in order (model-specific → generic)
     3. Tests each with a canary query
     4. Locks in the winning combo (writes config.yaml + prefill.json)
-    
+
     Args:
         model: Model ID (e.g. "anthropic/claude-sonnet-4"). Auto-detected if None.
         base_url: API base URL. Auto-detected if None.
@@ -433,7 +433,7 @@ def auto_jailbreak(model=None, base_url=None, api_key=None,
         canary: Custom canary query to test with. Uses default if None.
         dry_run: If True, don't write config files — just report what would work.
         verbose: Print progress.
-    
+
     Returns:
         Dict with: success, model, family, strategy, system_prompt, prefill,
                     score, content_preview, config_path, prefill_path, attempts
