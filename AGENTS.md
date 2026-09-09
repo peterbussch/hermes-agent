@@ -4,6 +4,15 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Local runtime preservation
+
+On Peter's workstation, `.hermes-runtime/` is the interpreter backing `venv/`,
+not a disposable cache. Before any runtime or virtualenv cleanup, resolve
+`venv/bin/python`, inspect live executable/library mappings and other consumers,
+and preserve a verified restoration source. An existing running process does
+not prove the files needed for its next launch still exist. After cleanup,
+verify the interpreter and compiled dependency imports before declaring success.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a
