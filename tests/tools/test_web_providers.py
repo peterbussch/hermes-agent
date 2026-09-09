@@ -202,11 +202,15 @@ class TestUnconfiguredErrorEnvelopeParity:
         monkeypatch.setattr(web_tools, "_firecrawl_client_config", None, raising=False)
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        monkeypatch.setattr(web_tools, "_get_search_backend", lambda: "firecrawl")
 
+        monkeypatch.setattr(
+            "agent.web_search_registry.get_provider_candidates",
+            lambda **_kwargs: [],
+        )
         result = json.loads(web_tools.web_search_tool("hello world", limit=3))
         assert "error" in result, f"expected top-level 'error' key, got {result}"
-        # ``Error searching web:`` prefix comes from web_tools' top-level except handler
-        assert "Error searching web:" in result["error"]
+        assert "All web search providers were unusable" in result["error"]
         assert "FIRECRAWL_API_KEY" in result["error"]
         # No per-result burying
         assert "results" not in result
@@ -311,6 +315,10 @@ class TestDispatchersTriggerPluginDiscovery:
                 web_tools, "_load_web_config",
                 lambda: {"extract_backend": "firecrawl"},
             )
+            async def _safe(_url):
+                return True
+
+            monkeypatch.setattr(web_tools, "async_is_safe_url", _safe)
             # Sanity: registry IS empty before the tool call.
             assert web_search_registry.get_provider("firecrawl") is None
 
@@ -469,4 +477,3 @@ class TestDisabledPluginDiagnostic:
             assert "No web search provider configured" not in err
         finally:
             restore()
-

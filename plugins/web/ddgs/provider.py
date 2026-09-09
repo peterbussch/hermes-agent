@@ -27,7 +27,7 @@ import sys
 import time
 from typing import Any, Dict, Optional
 
-from agent.web_search_provider import WebSearchProvider
+from agent.web_search_provider import WebSearchProvider, query_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -318,14 +318,15 @@ class DDGSWebSearchProvider(WebSearchProvider):
         # DDGS().text yields at most `max_results` items; we cap defensively
         # in case the package ignores the hint.
         safe_limit = max(1, int(limit))
+        query_sha256 = query_fingerprint(query)
 
         try:
             web_results = _run_ddgs_search_bounded(query, safe_limit)
         except TimeoutError:
             logger.warning(
-                "DDGS search timed out after %ds for query: %r",
+                "DDGS search timed out after %ds for query_sha256=%s",
                 _SEARCH_TIMEOUT_SECS,
-                query,
+                query_sha256[:12],
             )
             return {
                 "success": False,
@@ -336,7 +337,10 @@ class DDGSWebSearchProvider(WebSearchProvider):
                 ),
             }
         except _SearchInterrupted:
-            logger.info("DDGS search interrupted for query: %r", query)
+            logger.info(
+                "DDGS search interrupted for query_sha256=%s",
+                query_sha256[:12],
+            )
             return {
                 "success": False,
                 "error": "DuckDuckGo search interrupted",
@@ -346,7 +350,10 @@ class DDGSWebSearchProvider(WebSearchProvider):
             return {"success": False, "error": f"DuckDuckGo search failed: {exc}"}
 
         logger.info(
-            "DDGS search '%s': %d results (limit %d)", query, len(web_results), limit
+            "DDGS search query_sha256=%s: %d results (limit %d)",
+            query_sha256[:12],
+            len(web_results),
+            limit,
         )
         return {"success": True, "data": {"web": web_results}}
 

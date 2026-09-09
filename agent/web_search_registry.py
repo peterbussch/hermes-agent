@@ -166,6 +166,71 @@ _LEGACY_PREFERENCE = (
     "ddgs",
 )
 
+# Free extract-only helpers trail the legacy configured providers.  A
+# configured provider is always first; this order is only the rescue walk.
+_EXTRACT_FALLBACK_PREFERENCE = ("jina", "local_browser")
+
+
+def get_provider_candidates(
+    *, capability: str, configured: Optional[str] = None
+) -> List[WebSearchProvider]:
+    """Return an ordered, de-duplicated provider chain for one call.
+
+    The configured provider remains authoritative as the first attempt even
+    when its cheap readiness probe is false, preserving Hermes' precise setup
+    diagnostics.  Rescue candidates must be capability-compatible and
+    currently available.  The function only orders candidates; the dispatcher
+    decides whether a concrete result warrants advancing through the chain.
+    """
+    with _lock:
+        snapshot = dict(_providers)
+        snapshot.update(_scoped_providers.get(hermes_home_key(), {}))
+
+    def _capable(provider: WebSearchProvider) -> bool:
+        try:
+            return bool(
+                provider.supports_search()
+                if capability == "search"
+                else provider.supports_extract()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider %s capability probe raised %s", provider.name, exc)
+            return False
+
+    def _available(provider: WebSearchProvider) -> bool:
+        try:
+            return bool(provider.is_available())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider %s.is_available() raised %s", provider.name, exc)
+            return False
+
+    ordered: List[WebSearchProvider] = []
+    seen: set[str] = set()
+
+    def _add(name: Optional[str], *, require_available: bool) -> None:
+        if not name or name in seen:
+            return
+        provider = snapshot.get(name)
+        if provider is None or not _capable(provider):
+            return
+        if require_available and not _available(provider):
+            return
+        seen.add(name)
+        ordered.append(provider)
+
+    _add(configured, require_available=False)
+    active = _resolve(configured, capability=capability)
+    _add(getattr(active, "name", None), require_available=active is not None and not configured)
+
+    preference = list(_LEGACY_PREFERENCE)
+    if capability == "extract":
+        preference.extend(_EXTRACT_FALLBACK_PREFERENCE)
+    for name in preference:
+        _add(name, require_available=True)
+    for name in sorted(snapshot):
+        _add(name, require_available=True)
+    return ordered
+
 
 def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearchProvider]:
     """Resolve the active provider for a capability ("search" | "extract").

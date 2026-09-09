@@ -50,7 +50,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from agent.web_search_provider import WebSearchProvider
+from agent.web_search_provider import WebSearchProvider, query_fingerprint
 from tools.url_safety import is_safe_url
 from tools.website_policy import check_website_access
 
@@ -407,7 +407,11 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         if is_interrupted():
             return {"success": False, "error": "Interrupted"}
 
-        logger.info("Firecrawl search: '%s' (limit=%d)", query, limit)
+        logger.info(
+            "Firecrawl search: query_sha256=%s (limit=%d)",
+            query_fingerprint(query)[:12],
+            limit,
+        )
         # _get_firecrawl_client() raises ValueError on unconfigured systems —
         # let it propagate so the dispatcher emits the legacy envelope shape.
         client = _get_firecrawl_client()

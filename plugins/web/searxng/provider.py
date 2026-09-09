@@ -26,7 +26,7 @@ import logging
 import os
 from typing import Any, Dict
 
-from agent.web_search_provider import WebSearchProvider
+from agent.web_search_provider import WebSearchProvider, query_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -88,16 +88,27 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            logger.warning("SearXNG HTTP error: %s", exc)
+            logger.warning(
+                "SearXNG HTTP error: status=%d query_sha256=%s",
+                exc.response.status_code,
+                query_fingerprint(query)[:12],
+            )
             return {
                 "success": False,
                 "error": f"SearXNG returned HTTP {exc.response.status_code}",
             }
         except httpx.RequestError as exc:
-            logger.warning("SearXNG request error: %s", exc)
+            logger.warning(
+                "SearXNG request error: type=%s query_sha256=%s",
+                type(exc).__name__,
+                query_fingerprint(query)[:12],
+            )
             return {
                 "success": False,
-                "error": f"Could not reach SearXNG at {base_url}: {exc}",
+                "error": (
+                    f"Could not reach SearXNG at {base_url} "
+                    f"({type(exc).__name__})"
+                ),
             }
 
         try:
@@ -124,19 +135,27 @@ class SearXNGWebSearchProvider(WebSearchProvider):
                 "url": str(r.get("url", "")),
                 "description": str(r.get("content", "")),
                 "position": i + 1,
+                "engine": str(r.get("engine", "")),
+                "engines": [str(engine) for engine in (r.get("engines") or [])],
             }
             for i, r in enumerate(sorted_results)
         ]
 
         logger.info(
-            "SearXNG search '%s': %d results (from %d raw, limit %d)",
-            query,
+            "SearXNG search query_sha256=%s: %d results (from %d raw, limit %d)",
+            query_fingerprint(query)[:12],
             len(web_results),
             len(raw_results),
             limit,
         )
 
-        return {"success": True, "data": {"web": web_results}}
+        return {
+            "success": True,
+            "data": {
+                "web": web_results,
+                "unresponsive_engines": data.get("unresponsive_engines", []),
+            },
+        }
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {

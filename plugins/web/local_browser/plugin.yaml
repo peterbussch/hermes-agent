@@ -1,0 +1,7 @@
+name: web-local-browser
+version: 1.0.0
+description: "Local JavaScript-rendered extraction via nodriver and trafilatura."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - local_browser

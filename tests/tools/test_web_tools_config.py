@@ -280,7 +280,8 @@ class TestParallelClientConfig:
 
     def test_creates_client_with_key(self):
         """PARALLEL_API_KEY set → creates Parallel client."""
-        with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
+        with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}), \
+             patch("plugins.web.parallel.provider._ensure_parallel_sdk_installed"):
             from tools.web_tools import _get_parallel_client
             from parallel import Parallel
             client = _get_parallel_client()
@@ -295,7 +296,8 @@ class TestParallelClientConfig:
 
     def test_singleton_returns_same_instance(self):
         """Second call returns cached client."""
-        with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
+        with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}), \
+             patch("plugins.web.parallel.provider._ensure_parallel_sdk_installed"):
             from tools.web_tools import _get_parallel_client
             client1 = _get_parallel_client()
             client2 = _get_parallel_client()
@@ -325,7 +327,10 @@ class TestWebSearchSchema:
         # tool dispatcher resolves a provider from the registry and calls
         # provider.search(query, limit). Mock the provider lookup so we can
         # assert the limit is clamped before reaching the backend.
-        fake_search = MagicMock(return_value={"success": True, "data": {"web": []}})
+        fake_search = MagicMock(return_value={
+            "success": True,
+            "data": {"web": [{"title": "docs", "url": "https://example.com"}]},
+        })
         fake_provider = MagicMock(
             name="ParallelWebSearchProvider",
             supports_search=MagicMock(return_value=True),
@@ -340,7 +345,9 @@ class TestWebSearchSchema:
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("docs", limit=500))
 
-        assert result == {"success": True, "data": {"web": []}}
+        assert result["success"] is True
+        assert result["data"]["web"][0]["title"] == "docs"
+        assert result["data"]["provider"] == "parallel"
         fake_search.assert_called_once_with("docs", 100)
 
 
@@ -363,15 +370,20 @@ class TestWebSearchErrorHandling:
 
         with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
              patch("agent.web_search_registry.get_provider", return_value=fake_provider), \
+             patch("agent.web_search_registry.get_provider_candidates", return_value=[]), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch.object(tools.web_tools._debug, "log_call") as mock_log_call, \
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("test query", limit=3))
 
-        assert result == {"error": "Error searching web: boom"}
+        assert result["success"] is False
+        assert "boom" in result["error"]
+        assert result["provenance"] == [
+            {"provider": "firecrawl", "status": "error", "error": "boom"}
+        ]
 
         debug_payload = mock_log_call.call_args.args[1]
-        assert debug_payload["error"] == "Error searching web: boom"
+        assert "boom" in debug_payload["error"]
         assert "traceback" not in debug_payload["error"]
         assert "exception_type" not in debug_payload["error"]
         assert "config" not in result

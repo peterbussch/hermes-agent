@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 import types
@@ -116,6 +117,19 @@ class TestDDGSProviderSearch:
         result = prov.DDGSWebSearchProvider().search("nothing", limit=5)
         assert result["success"] is True
         assert result["data"]["web"] == []
+
+    def test_routine_log_fingerprints_query(self, monkeypatch, caplog):
+        _install_fake_ddgs(monkeypatch, text_results=[])
+        import plugins.web.ddgs.provider as prov
+
+        _force_inprocess_search(monkeypatch, prov)
+        query = "sensitive collection marker"
+
+        with caplog.at_level(logging.INFO, logger=prov.logger.name):
+            prov.DDGSWebSearchProvider().search(query, limit=5)
+
+        assert query not in caplog.text
+        assert "a78f6850fb9a" in caplog.text
 
     @pytest.mark.live_system_guard_bypass
     def test_hung_search_times_out_and_returns_failure(self, monkeypatch):

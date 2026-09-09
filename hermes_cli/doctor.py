@@ -1262,6 +1262,16 @@ def run_doctor(args):
             # aggregator (e.g. custom:hpc-ai serving deepseek/deepseek-v4-flash) requires the prefix.
             provider_for_policy = runtime_provider or catalog_provider
             provider_policy_id = str(provider_for_policy or "").strip().lower()
+            user_provider_cfg = (
+                user_providers.get(provider_policy_id)
+                if isinstance(user_providers, dict)
+                and isinstance(user_providers.get(provider_policy_id), dict)
+                else None
+            )
+            user_provider_is_gateway = bool(
+                user_provider_cfg
+                and str(user_provider_cfg.get("base_url") or "").strip()
+            )
             providers_accepting_vendor_slugs = {
                 "openrouter",
                 "auto",
@@ -1285,6 +1295,7 @@ def run_doctor(args):
                 provider_policy_id in providers_accepting_vendor_slugs
                 or provider_policy_id == "custom"
                 or provider_policy_id.startswith("custom:")
+                or user_provider_is_gateway
             )
             if (
                 default_model

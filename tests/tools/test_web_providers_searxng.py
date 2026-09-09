@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -42,10 +43,11 @@ class TestSearXNGSearchProviderSearch:
 
     _SAMPLE_RESPONSE = {
         "results": [
-            {"title": "Result A", "url": "https://a.example.com", "content": "Desc A", "score": 0.9},
-            {"title": "Result B", "url": "https://b.example.com", "content": "Desc B", "score": 0.7},
-            {"title": "Result C", "url": "https://c.example.com", "content": "Desc C", "score": 0.5},
-        ]
+            {"title": "Result A", "url": "https://a.example.com", "content": "Desc A", "score": 0.9, "engine": "yandex", "engines": ["yandex"]},
+            {"title": "Result B", "url": "https://b.example.com", "content": "Desc B", "score": 0.7, "engine": "bing", "engines": ["bing", "baidu"]},
+            {"title": "Result C", "url": "https://c.example.com", "content": "Desc C", "score": 0.5, "engine": "baidu", "engines": ["baidu"]},
+        ],
+        "unresponsive_engines": [["google", "timeout"]],
     }
 
     def _make_mock_response(self, json_data, status_code=200):
@@ -70,6 +72,9 @@ class TestSearXNGSearchProviderSearch:
         assert web[0]["url"] == "https://a.example.com"
         assert web[0]["description"] == "Desc A"
         assert web[0]["position"] == 1
+        assert web[0]["engine"] == "yandex"
+        assert web[0]["engines"] == ["yandex"]
+        assert result["data"]["unresponsive_engines"] == [["google", "timeout"]]
 
     def test_results_sorted_by_score_descending(self, monkeypatch):
         """Results should be sorted by score before limit is applied."""
@@ -108,6 +113,46 @@ class TestSearXNGSearchProviderSearch:
             SearXNGWebSearchProvider().search("query", limit=5)
 
         assert calls[0] == "http://localhost:8080/search", f"Got: {calls[0]}"
+
+    def test_routine_log_fingerprints_query(self, monkeypatch, caplog):
+        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+
+        mock_resp = self._make_mock_response({"results": []})
+        query = "sensitive collection marker"
+
+        with patch("httpx.get", return_value=mock_resp), caplog.at_level(
+            logging.INFO, logger="plugins.web.searxng.provider"
+        ):
+            SearXNGWebSearchProvider().search(query, limit=5)
+
+        assert query not in caplog.text
+        assert "a78f6850fb9a" in caplog.text
+
+    def test_http_error_log_does_not_retain_query(self, monkeypatch, caplog):
+        """Rendering an HTTPStatusError must not persist its query-bearing URL."""
+        import httpx
+
+        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+
+        query = "PRIVATE_REVIEW_MARKER_9f731"
+        request = httpx.Request(
+            "GET",
+            "http://localhost:8080/search",
+            params={"q": query, "format": "json", "pageno": 1},
+        )
+        response = httpx.Response(500, request=request)
+
+        with patch("httpx.get", return_value=response), caplog.at_level(
+            logging.WARNING, logger="plugins.web.searxng.provider"
+        ):
+            result = SearXNGWebSearchProvider().search(query, limit=5)
+
+        assert result == {"success": False, "error": "SearXNG returned HTTP 500"}
+        assert query not in caplog.text
+        assert "81c8bf6143c4" in caplog.text
+        assert "500" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -52,8 +52,14 @@ On failure (either capability)::
 from __future__ import annotations
 
 import abc
+import hashlib
 import os
 from typing import Any, Dict, List, Optional
+
+
+def query_fingerprint(query: str) -> str:
+    """Return a deterministic identifier without retaining query plaintext."""
+    return hashlib.sha256(query.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def get_provider_env(name: str) -> str:

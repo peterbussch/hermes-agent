@@ -41,8 +41,11 @@ import logging
 import os
 import re
 import asyncio
+import threading
+import time
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
+from agent.web_search_provider import query_fingerprint
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
 # proxy, client construction, and response-shape normalizers all live in
 # plugins.web.firecrawl.provider. We re-export the names that external
@@ -298,13 +301,44 @@ def _get_extract_backend() -> str:
 def _get_capability_backend(capability: str) -> str:
     """Shared helper for per-capability backend selection.
 
-    Reads ``web.{capability}_backend`` from config; if set and available,
-    uses it. Otherwise falls through to the shared ``_get_backend()``.
+    Explicit capability config remains authoritative even while a provider is
+    in process-local cooldown so its configured fallback chain can still run.
+    With no config, selection is capability-aware and cannot auto-pick a
+    search-only provider for extraction.
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
-    if specific and _is_backend_available(specific):
-        return specific
+    if specific:
+        provider = _registered_web_provider(specific)
+        if provider is not None:
+            try:
+                supports = (
+                    provider.supports_search()
+                    if capability == "search"
+                    else provider.supports_extract()
+                )
+            except Exception:  # noqa: BLE001 — selection must remain fail-safe
+                supports = False
+            if supports:
+                return specific
+        if _is_backend_available(specific):
+            return specific
+
+    # A shared backend is an explicit operator choice. Preserve it so the
+    # dispatcher can emit a precise capability error rather than silently
+    # overriding config.
+    shared = (cfg.get("backend") or "").lower().strip()
+    if shared:
+        return _get_backend()
+
+    try:
+        from agent.web_search_registry import get_provider_candidates
+
+        candidates = get_provider_candidates(capability=capability)
+        if candidates:
+            return candidates[0].name
+    except Exception as exc:  # noqa: BLE001 — legacy resolver remains fallback
+        logger.debug("capability-aware backend selection failed: %s", exc)
     return _get_backend()
 
 
@@ -622,6 +656,500 @@ def _ensure_web_plugins_loaded() -> None:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
 
+def _redact_web_failure(value: Any, *, query: Optional[str] = None) -> str:
+    from agent.redact import redact_sensitive_text
+    from urllib.parse import quote, quote_plus
+
+    redacted = redact_sensitive_text(str(value), force=True)
+    if not query:
+        return redacted
+
+    marker = f"[query sha256={query_fingerprint(query)[:12]}]"
+    variants = {query, quote(query, safe=""), quote_plus(query, safe="")}
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            redacted = redacted.replace(variant, marker)
+    return redacted
+
+
+_SEARCH_FAILURE_THRESHOLD = 3
+_SEARCH_COOLDOWN_SECONDS = 120.0
+_SEARCH_CIRCUIT_LOCK = threading.Lock()
+_SEARCH_CIRCUIT: Dict[str, Dict[str, float]] = {}
+
+
+def _reset_search_circuit_for_tests() -> None:
+    with _SEARCH_CIRCUIT_LOCK:
+        _SEARCH_CIRCUIT.clear()
+
+
+def _search_circuit_open(provider_name: str) -> bool:
+    now = time.monotonic()
+    with _SEARCH_CIRCUIT_LOCK:
+        state = _SEARCH_CIRCUIT.get(provider_name)
+        if not state:
+            return False
+        if state.get("cooldown_until", 0.0) > now:
+            return True
+        if state.get("cooldown_until", 0.0):
+            # Cooldown expired: reserve exactly one half-open attempt. The
+            # result recorder either clears the state or reopens the circuit.
+            if state.get("half_open_in_flight", 0.0):
+                return True
+            state["half_open_in_flight"] = 1.0
+        return False
+
+
+def _record_search_provider_failure(provider_name: str) -> None:
+    now = time.monotonic()
+    with _SEARCH_CIRCUIT_LOCK:
+        state = _SEARCH_CIRCUIT.setdefault(
+            provider_name,
+            {
+                "failures": 0.0,
+                "cooldown_until": 0.0,
+                "half_open_in_flight": 0.0,
+            },
+        )
+        if state.get("half_open_in_flight", 0.0):
+            state["half_open_in_flight"] = 0.0
+            state["failures"] = float(_SEARCH_FAILURE_THRESHOLD)
+            state["cooldown_until"] = now + _SEARCH_COOLDOWN_SECONDS
+            return
+        state["failures"] += 1.0
+        if state["failures"] >= _SEARCH_FAILURE_THRESHOLD:
+            state["cooldown_until"] = now + _SEARCH_COOLDOWN_SECONDS
+            state["half_open_in_flight"] = 0.0
+
+
+def _record_search_provider_operational(provider_name: str) -> None:
+    with _SEARCH_CIRCUIT_LOCK:
+        _SEARCH_CIRCUIT.pop(provider_name, None)
+
+
+def _usable_search_results(results: Any) -> List[Dict[str, Any]]:
+    """Keep only concrete HTTP(S) results that are not interstitial junk."""
+    from urllib.parse import urlsplit
+
+    from plugins.web.local_browser.content_quality import classify_extraction
+
+    usable: List[Dict[str, Any]] = []
+    if not isinstance(results, list):
+        return usable
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or item.get("href") or "").strip()
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        title = str(item.get("title") or "").strip()
+        description = str(
+            item.get("description") or item.get("content") or item.get("snippet") or ""
+        ).strip()
+        quality = classify_extraction(
+            {"url": url, "title": title, "content": description or title}
+        )
+        if quality["content_class"] in {
+            "empty",
+            "placeholder",
+            "login_wall",
+            "challenge",
+        }:
+            continue
+        usable.append(item)
+    return usable
+
+
+def _search_attempt_record(
+    provider_name: str,
+    response: Any,
+    *,
+    query: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Classify a search response by usable results, not HTTP success alone."""
+    if not isinstance(response, dict):
+        return {
+            "provider": provider_name,
+            "status": "error",
+            "error": f"invalid response type: {type(response).__name__}",
+        }
+    if not response.get("success"):
+        return {
+            "provider": provider_name,
+            "status": "error",
+            "error": _redact_web_failure(
+                response.get("error") or "search failed",
+                query=query,
+            ),
+        }
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    web = data.get("web") if isinstance(data, dict) else None
+    usable = _usable_search_results(web)
+    if not usable:
+        record: Dict[str, Any] = {
+            "provider": provider_name,
+            "status": "empty",
+            "error": "provider returned no usable search results",
+        }
+        # Metasearch providers expose per-engine CAPTCHA/rate-limit failures
+        # next to ``web``. Preserve them so HTTP-200/empty is visibly degraded.
+        details = {
+            key: value
+            for key, value in data.items()
+            if key != "web" and value not in (None, "", [], {})
+        }
+        if details:
+            record["details"] = details
+        diagnostic_keys = {
+            str(key).lower() for key in details
+            if any(
+                marker in str(key).lower()
+                for marker in ("unresponsive", "error", "fail", "blocked", "rate")
+            )
+        }
+        if diagnostic_keys or (isinstance(web, list) and bool(web)):
+            record["status"] = "degraded"
+            record["discarded_results_count"] = len(web) if isinstance(web, list) else 0
+        return record
+    return {
+        "provider": provider_name,
+        "status": "success",
+        "results_count": len(usable),
+    }
+
+
+def _search_with_fallback(providers, query: str, limit: int) -> Dict[str, Any]:
+    """Try providers until one returns at least one concrete search result."""
+    provenance: List[Dict[str, Any]] = []
+    for position, provider in enumerate(providers):
+        if _search_circuit_open(provider.name):
+            provenance.append(
+                {
+                    "provider": provider.name,
+                    "status": "circuit_open",
+                    "error": "provider temporarily skipped after repeated failures",
+                }
+            )
+            continue
+        try:
+            response = provider.search(query, limit)
+        except Exception as exc:  # noqa: BLE001 — fallback boundary
+            _record_search_provider_failure(provider.name)
+            provenance.append(
+                {
+                    "provider": provider.name,
+                    "status": "error",
+                    "error": _redact_web_failure(exc, query=query),
+                }
+            )
+            continue
+
+        attempt = _search_attempt_record(provider.name, response, query=query)
+        provenance.append(attempt)
+        if attempt["status"] in {"error", "degraded"}:
+            _record_search_provider_failure(provider.name)
+        else:
+            # A genuine empty query result is not a provider outage. It still
+            # advances to a fallback for recall, but resets transport failures.
+            _record_search_provider_operational(provider.name)
+        if attempt["status"] != "success":
+            continue
+
+        response = dict(response)
+        data = dict(response.get("data") or {})
+        data["web"] = _usable_search_results(data.get("web"))
+        data.update(
+            {
+                "provider": provider.name,
+                "fallback": position > 0,
+                "provenance": list(provenance),
+            }
+        )
+        response["data"] = data
+        return response
+
+    errors = "; ".join(
+        f"{item['provider']}: {item.get('error', item['status'])}"
+        for item in provenance
+    )
+    return {
+        "success": False,
+        "error": f"All web search providers were unusable ({errors})",
+        "provider": None,
+        "fallback": len(provenance) > 1,
+        "provenance": provenance,
+    }
+
+
+def _provider_chain(primary, candidates):
+    """Keep the already-resolved instance first, including test/custom objects."""
+    if primary is None:
+        return list(candidates)
+    return [primary] + [
+        candidate
+        for candidate in candidates
+        if candidate is not primary and candidate.name != primary.name
+    ]
+
+
+async def _call_extract_provider(provider, urls: List[str], *, format: str):
+    """Call one extract provider without blocking the event loop."""
+    import inspect
+
+    if inspect.iscoroutinefunction(provider.extract):
+        return await provider.extract(urls, format=format)
+    return await asyncio.to_thread(provider.extract, urls, format=format)
+
+
+async def _extract_known_json_url(url: str) -> Optional[Dict[str, Any]]:
+    """Fetch known public JSON endpoints directly instead of reader-wrapping.
+
+    FXTwitter status endpoints are already structured public JSON. Sending
+    them through a generic reader can turn valid JSON into an error page or
+    discard fields, so exact ``api.fxtwitter.com`` HTTPS URLs get one direct
+    attempt. ``None`` means the URL is not on this deliberately tiny allowlist.
+    """
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "api.fxtwitter.com":
+        return None
+    from tools.website_policy import check_website_access
+
+    blocked = check_website_access(url)
+    if blocked:
+        return {
+            "url": url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": blocked["message"],
+            "blocked_by_policy": {
+                "host": blocked["host"],
+                "rule": blocked["rule"],
+                "source": blocked["source"],
+            },
+        }
+    try:
+        timeout = httpx.Timeout(10.0, connect=3.0, read=10.0)
+        # Do not follow redirects on the local direct-fetch path: the original
+        # URL passed the SSRF gate, but a redirect target has not. Generic
+        # reader providers may still handle the URL remotely if this declines.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            response = await client.get(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    # FXTwitter rejects httpx's library-identifying default
+                    # while serving the same public JSON to normal browsers.
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0 Safari/537.36"
+                    ),
+                },
+            )
+            if 300 <= response.status_code < 400:
+                raise ValueError("direct JSON endpoint redirected")
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("endpoint did not return a JSON object")
+        tweet = payload.get("tweet")
+        if not isinstance(tweet, dict):
+            raise ValueError("endpoint did not return a tweet envelope")
+        tweet_id = str(tweet.get("id") or "").strip()
+        tweet_text = str(tweet.get("text") or "").strip()
+        expected_id = parsed.path.rstrip("/").split("/")[-1]
+        if not tweet_id or not tweet_text or tweet_id != expected_id:
+            raise ValueError("tweet envelope was missing or mismatched")
+        content = json.dumps(payload, indent=2, ensure_ascii=False)
+        return {
+            "url": url,
+            "title": f"FXTwitter status {expected_id}",
+            "content": content,
+            "raw_content": content,
+            "metadata": {
+                "provider": "direct_json",
+                "sourceURL": url,
+                "validated": True,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001 — dispatcher will continue to Jina
+        return {
+            "url": url,
+            "title": "",
+            "content": "",
+            "raw_content": "",
+            "error": (
+                "Direct FXTwitter JSON extract failed: "
+                f"{_redact_web_failure(exc)}"
+            ),
+        }
+
+
+def _quality_score(result: Dict[str, Any]) -> float:
+    base = {
+        "article": 10.0,
+        "partial": 5.0,
+        "placeholder": 1.0,
+        "login_wall": 1.0,
+        "challenge": 1.0,
+        "empty": 0.0,
+    }.get(result.get("content_class"), 0.0)
+    return base + float(result.get("completeness") or 0.0)
+
+
+async def _extract_with_fallback(
+    providers, urls: List[str], *, format: str
+) -> List[Dict[str, Any]]:
+    """Retry only degraded URLs while preserving every input position."""
+    from plugins.web.local_browser.content_quality import annotate_extraction
+
+    attempts: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(len(urls))}
+    best: Dict[int, Dict[str, Any]] = {}
+    selected_provider: Dict[int, str] = {}
+    unresolved = list(range(len(urls)))
+
+    # Allowlisted structured endpoints get a direct attempt before generic
+    # readers. Failed direct attempts remain visible in provenance and then
+    # proceed through the normal provider chain.
+    direct_unresolved: List[int] = []
+    for original_index in unresolved:
+        direct = await _extract_known_json_url(urls[original_index])
+        if direct is None:
+            direct_unresolved.append(original_index)
+            continue
+        candidate = annotate_extraction(direct)
+        if (
+            not candidate.get("error")
+            and (candidate.get("metadata") or {}).get("validated") is True
+        ):
+            candidate.update(
+                {
+                    "content_class": "article",
+                    "status": "success",
+                    "completeness": 1.0,
+                    "blocker": None,
+                }
+            )
+        attempt = {
+            "provider": "direct_json",
+            "status": candidate["status"],
+            "content_class": candidate["content_class"],
+            "completeness": candidate["completeness"],
+            "blocker": candidate["blocker"],
+        }
+        if candidate.get("error"):
+            attempt["error"] = _redact_web_failure(candidate["error"])
+        attempts[original_index].append(attempt)
+        best[original_index] = candidate
+        selected_provider[original_index] = "direct_json"
+        if (
+            candidate["content_class"] != "article"
+            and not candidate.get("blocked_by_policy")
+        ):
+            direct_unresolved.append(original_index)
+    unresolved = direct_unresolved
+
+    for provider in providers:
+        if not unresolved:
+            break
+        batch_indices = list(unresolved)
+        next_unresolved: List[int] = []
+        for original_index in batch_indices:
+            requested_url = urls[original_index]
+            try:
+                raw_results = await _call_extract_provider(
+                    provider, [requested_url], format=format
+                )
+                if not isinstance(raw_results, list):
+                    raise TypeError(
+                        f"{provider.name} returned {type(raw_results).__name__}, "
+                        "expected list"
+                    )
+                if len(raw_results) != 1 or not isinstance(raw_results[0], dict):
+                    raise ValueError(
+                        "Extract backend returned no result for this URL"
+                        if not raw_results
+                        else "Extract backend returned an ambiguous result set"
+                    )
+                candidate = dict(raw_results[0])
+                returned_url = str(candidate.get("url") or "").strip()
+                if returned_url and returned_url != requested_url:
+                    raise ValueError(
+                        "Extract backend returned no result for this URL "
+                        f"(unexpected URL {returned_url})"
+                    )
+                candidate["url"] = requested_url
+            except Exception as exc:  # noqa: BLE001 — per-URL fallback boundary
+                candidate = {
+                    "url": requested_url,
+                    "title": "",
+                    "content": "",
+                    "raw_content": "",
+                    "error": (
+                        f"{provider.display_name} extract failed: "
+                        f"{_redact_web_failure(exc)}"
+                    ),
+                }
+            candidate = annotate_extraction(candidate)
+            attempt = {
+                "provider": provider.name,
+                "status": candidate["status"],
+                "content_class": candidate["content_class"],
+                "completeness": candidate["completeness"],
+                "blocker": candidate["blocker"],
+            }
+            if candidate.get("error"):
+                attempt["error"] = _redact_web_failure(candidate["error"])
+            attempts[original_index].append(attempt)
+
+            if (
+                original_index not in best
+                or _quality_score(candidate) > _quality_score(best[original_index])
+            ):
+                best[original_index] = candidate
+                selected_provider[original_index] = provider.name
+
+            if (
+                candidate["content_class"] != "article"
+                and not candidate.get("blocked_by_policy")
+            ):
+                next_unresolved.append(original_index)
+        unresolved = next_unresolved
+
+    results: List[Dict[str, Any]] = []
+    for index, url in enumerate(urls):
+        selected = dict(
+            best.get(
+                index,
+                annotate_extraction(
+                    {
+                        "url": url,
+                        "title": "",
+                        "content": "",
+                        "raw_content": "",
+                        "error": "No extract provider returned a result",
+                    }
+                ),
+            )
+        )
+        provider_name = selected_provider.get(index, "")
+        first_provider = attempts[index][0]["provider"] if attempts[index] else ""
+        selected.update(
+            {
+                "provider": provider_name,
+                "fallback": bool(first_provider and provider_name != first_provider),
+                "fallback_attempted": len(attempts[index]) > 1,
+                "provenance": attempts[index],
+            }
+        )
+        results.append(selected)
+    return results
+
+
 def web_search_tool(query: str, limit: int = 5) -> str:
     """
     Search the web for information using available search API backend.
@@ -661,10 +1189,11 @@ def web_search_tool(query: str, limit: int = 5) -> str:
     except (TypeError, ValueError):
         limit = 5
     limit = min(max(limit, 1), 100)
+    query_sha256 = query_fingerprint(query)
 
     debug_call_data = {
         "parameters": {
-            "query": query,
+            "query_sha256": query_sha256,
             "limit": limit
         },
         "error": None,
@@ -685,6 +1214,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         _ensure_web_plugins_loaded()
         from agent.web_search_registry import (
             get_active_search_provider,
+            get_provider_candidates,
             get_provider as _wsp_get_provider,
             _disabled_web_plugin_for,
         )
@@ -723,12 +1253,18 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 }
         else:
             logger.info(
-                "Web search via %s: '%s' (limit: %d)",
-                provider.name, query, limit,
+                "Web search via %s: query_sha256=%s (limit: %d)",
+                provider.name, query_sha256[:12], limit,
             )
-            response_data = provider.search(query, limit)
+            candidates = get_provider_candidates(
+                capability="search", configured=provider.name
+            )
+            candidates = _provider_chain(provider, candidates)
+            response_data = _search_with_fallback(candidates, query, limit)
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+        if not response_data.get("success", False):
+            debug_call_data["error"] = response_data.get("error")
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
         debug_call_data["final_response_size"] = len(result_json)
         _debug.log_call("web_search_tool", debug_call_data)
@@ -736,7 +1272,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return result_json
 
     except Exception as e:
-        error_msg = f"Error searching web: {str(e)}"
+        error_msg = f"Error searching web: {_redact_web_failure(e, query=query)}"
         logger.debug("%s", error_msg)
 
         debug_call_data["error"] = error_msg
@@ -861,6 +1397,12 @@ async def web_extract_tool(
         if not safe_urls:
             results = []
         else:
+            # Capability-specific backends may be plugin-only (for example
+            # Jina/local_browser). Discover them before availability-based
+            # config resolution; otherwise the shared search backend can win
+            # and a registered search-only provider is reported as the
+            # extractor even though web.extract_backend is valid.
+            _ensure_web_plugins_loaded()
             backend = _get_extract_backend()
 
             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
@@ -870,9 +1412,9 @@ async def web_extract_tool(
             # detect coroutine functions and await; sync functions run
             # inline (the policy gate, SSRF re-check, etc. live inside the
             # provider itself for the firecrawl per-URL loop).
-            _ensure_web_plugins_loaded()
             from agent.web_search_registry import (
                 get_active_extract_provider,
+                get_provider_candidates,
                 get_provider as _wsp_get_provider,
                 _disabled_web_plugin_for,
             )
@@ -937,17 +1479,13 @@ async def web_extract_tool(
                 "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
             )
 
-            # Async-or-sync dispatch: parallel + firecrawl have async
-            # extract(); exa + tavily are sync.
-            import inspect
-            if inspect.iscoroutinefunction(provider.extract):
-                results = await provider.extract(safe_urls, format=format)
-            else:
-                # Run sync extract() in a thread so we don't block the
-                # event loop on network I/O.
-                results = await asyncio.to_thread(
-                    provider.extract, safe_urls, format=format
-                )
+            candidates = get_provider_candidates(
+                capability="extract", configured=provider.name
+            )
+            candidates = _provider_chain(provider, candidates)
+            results = await _extract_with_fallback(
+                candidates, safe_urls, format=format
+            )
 
         # Reconstruct the original input order across invalid, blocked, and
         # provider-processed entries. Providers are expected to preserve the
@@ -1016,6 +1554,14 @@ async def web_extract_tool(
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
+                "content_class": r.get("content_class", "empty"),
+                "status": r.get("status", "error"),
+                "completeness": r.get("completeness", 0.0),
+                "blocker": r.get("blocker"),
+                "provider": r.get("provider", ""),
+                "fallback": bool(r.get("fallback", False)),
+                "fallback_attempted": bool(r.get("fallback_attempted", False)),
+                "provenance": r.get("provenance", []),
                 **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
             for r in response.get("results", [])

@@ -35,7 +35,7 @@ import secrets
 import threading
 from typing import Any, Dict, List
 
-from agent.web_search_provider import WebSearchProvider
+from agent.web_search_provider import WebSearchProvider, query_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,10 @@ class ParallelWebSearchProvider(WebSearchProvider):
                 legacy_env_mode = _get_parallel_env("PARALLEL_SEARCH_MODE")
             mode = _resolve_search_mode(configured_mode, legacy_env_mode)
             logger.info(
-                "Parallel search: '%s' (mode=%s, limit=%d)", query, mode, limit
+                "Parallel search: query_sha256=%s (mode=%s, limit=%d)",
+                query_fingerprint(query)[:12],
+                mode,
+                limit,
             )
             response = _get_sync_client().search(
                 search_queries=[query],

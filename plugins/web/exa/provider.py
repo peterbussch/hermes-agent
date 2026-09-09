@@ -28,7 +28,7 @@ import logging
 import os
 from typing import Any, Dict, List
 
-from agent.web_search_provider import WebSearchProvider
+from agent.web_search_provider import WebSearchProvider, query_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,11 @@ class ExaWebSearchProvider(WebSearchProvider):
             if is_interrupted():
                 return {"success": False, "error": "Interrupted"}
 
-            logger.info("Exa search: '%s' (limit=%d)", query, limit)
+            logger.info(
+                "Exa search: query_sha256=%s (limit=%d)",
+                query_fingerprint(query)[:12],
+                limit,
+            )
             response = _get_exa_client().search(
                 query,
                 num_results=limit,
