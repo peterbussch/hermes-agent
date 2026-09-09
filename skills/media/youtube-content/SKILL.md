@@ -5,6 +5,8 @@ version: 1.0.0
 author: Teknium (teknium1), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
+prerequisites:
+  commands: [uv, yt-dlp]
 metadata:
   hermes:
     tags: [YouTube, Video, Transcripts, Media]
@@ -71,13 +73,20 @@ After fetching the transcript, format it based on what the user asks for:
 
 1. **Fetch** the transcript using the helper script with `--text-only --timestamps` via `uv run python`.
 2. **Validate**: confirm the output is non-empty and in the expected language. If empty, retry without `--language` to get any available transcript. If still empty, tell the user the video likely has transcripts disabled.
-3. **Chunk if needed**: if the transcript exceeds ~50K characters, split into overlapping chunks (~40K with 2K overlap) and summarize each chunk before merging.
-4. **Transform** into the requested output format. If the user did not specify a format, default to a summary.
-5. **Verify**: re-read the transformed output to check for coherence, correct timestamps, and completeness before presenting.
+3. **Fallback with yt-dlp**: if the API helper reports disabled/missing transcripts, ask YouTube directly for generated or manual captions without downloading the video:
+
+   ```bash
+   yt-dlp --skip-download --write-subs --write-auto-subs --sub-langs "en.*,en" --sub-format vtt -o "%(id)s.%(ext)s" "URL"
+   ```
+
+   Treat a missing caption file as unavailable, not as proof that the video has no captions. Preserve the video URL and caption language in provenance. A JavaScript-runtime warning is a readiness warning; surface it rather than silently treating partial metadata as complete.
+4. **Chunk if needed**: if the transcript exceeds ~50K characters, split into overlapping chunks (~40K with 2K overlap) and summarize each chunk before merging.
+5. **Transform** into the requested output format. If the user did not specify a format, default to a summary.
+6. **Verify**: re-read the transformed output to check for coherence, correct timestamps, and completeness before presenting.
 
 ## Error Handling
 
-- **Transcript disabled**: tell the user; suggest they check if subtitles are available on the video page.
+- **Transcript disabled**: try the bounded `yt-dlp` caption fallback before reporting that captions are unavailable.
 - **Private/unavailable video**: relay the error and ask the user to verify the URL.
 - **No matching language**: retry without `--language` to fetch any available transcript, then note the actual language to the user.
 - **Dependency missing**: run `uv pip install youtube-transcript-api` and retry.
