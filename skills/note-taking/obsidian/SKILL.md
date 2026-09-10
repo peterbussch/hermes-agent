@@ -1,7 +1,7 @@
 ---
 name: obsidian
 description: Read, search, create, and edit notes in the Obsidian vault.
-version: 1.0.0
+version: 1.0.1
 author: Teknium (teknium1), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -17,13 +17,55 @@ Use this skill for filesystem-first Obsidian vault work: reading notes, listing 
 
 ## Vault path
 
-Use a known or resolved vault path before calling file tools.
+Use a known or resolved vault path before calling file tools. Never create a
+vault merely because a default path is absent.
 
-The documented vault-path convention is the `OBSIDIAN_VAULT_PATH` environment variable, for example from `${HERMES_HOME:-~/.hermes}/.env`. If it is unset, use `~/Documents/Obsidian Vault`.
+On Peter's workstation, the existence of
+`/Users/peterbusscher/vault/AGENTS.md` binds this skill to the canonical vault
+at `/Users/peterbusscher/vault` unless the user explicitly names a different
+vault in the current request. This binding takes precedence over an unset
+`OBSIDIAN_VAULT_PATH`. If that variable points elsewhere, do not treat the
+other directory as Peter's canonical knowledge base without explicit
+confirmation.
+
+On other machines, use the concrete path in `OBSIDIAN_VAULT_PATH`. If it is
+unset, ask for the vault path and fail closed; do not fall back to
+`~/Documents/Obsidian Vault` or initialize a new directory.
 
 File tools do not expand shell variables. Do not pass paths containing `$OBSIDIAN_VAULT_PATH` to `read_file`, `write_file`, `patch`, or `search_files`; resolve the vault path first and pass a concrete absolute path. Vault paths may contain spaces, which is another reason to prefer file tools over shell commands.
 
-If the vault path is unknown, `terminal` is acceptable for resolving `OBSIDIAN_VAULT_PATH` or checking whether the fallback path exists. Once the path is known, switch back to file tools.
+If the vault path is unknown, `terminal` is acceptable for resolving
+`OBSIDIAN_VAULT_PATH` or checking the Peter-workstation marker above. Once the
+path is known, switch back to file tools.
+
+## Peter's canonical vault
+
+When the Peter-workstation binding is active:
+
+1. Read `AGENTS.md`, `_system/POLICY.md`, `_system/TAXONOMY.md`,
+   `_system/SCHEMA.md`, and the nearest topic index before writing. Honor human
+   edit guards and taboo zones.
+2. Search before creating. Prefer
+   `/Users/peterbusscher/vault/_system/bin/llmwiki search "QUERY" --limit 10`,
+   then inspect the relevant topic `wiki/_index.md` or recursive Base. Update an
+   existing canonical note when it already answers the need.
+3. For an immutable `_session_research.md` capture, use the existing helper with
+   reviewed metadata and inspect its JSON dry run before saving:
+
+   ```bash
+   python3 /Users/peterbusscher/.agents/skills/vault-save/scripts/vault_persist.py \
+     /absolute/path/to/_session_research.md --source hermes \
+     --project PROJECT_SLUG --topic TOPIC_SLUG \
+     --related '[[vault/relative/existing-note]]' \
+     --source-task ACTUAL_TASK_ID --dry-run
+   ```
+
+   Repeat without `--dry-run` only after the destination and metadata are
+   correct. Re-run the exact command to verify `status: unchanged`. Do not
+   imitate the helper with a direct `_inbox` write.
+4. Use ordinary file tools for reviewed article/index edits that are not session
+   captures. Do not create a second `SCHEMA.md`, `index.md`, `log.md`, wiki root,
+   or Obsidian Sync configuration.
 
 ## Read a note
 

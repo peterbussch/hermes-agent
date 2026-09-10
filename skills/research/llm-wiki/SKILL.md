@@ -1,7 +1,7 @@
 ---
 name: llm-wiki
 description: "Karpathy's LLM Wiki: build/query interlinked markdown KB."
-version: 2.1.0
+version: 2.1.1
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -35,18 +35,47 @@ Use this skill when the user:
 
 ## Wiki Location
 
-**Location:** Set via `WIKI_PATH` environment variable (e.g. in `${HERMES_HOME:-~/.hermes}/.env`).
+### Peter workstation binding
 
-If unset, defaults to `~/wiki`.
+If `/Users/peterbusscher/vault/AGENTS.md` exists and the user has not explicitly
+selected a different wiki in the current request, bind this skill to:
 
 ```bash
-WIKI="${WIKI_PATH:-$HOME/wiki}"
+WIKI=/Users/peterbusscher/vault
 ```
 
-The wiki is just a directory of markdown files — open it in Obsidian, VS Code, or
-any editor. No database, no special tooling required.
+This branch takes precedence over an unset `WIKI_PATH`. A noncanonical
+`WIKI_PATH` is not silently treated as Peter's current vault. Before any write,
+read `AGENTS.md`, `_system/POLICY.md`, `_system/TAXONOMY.md`,
+`_system/SCHEMA.md`, `_system/llmwiki-master-index.md`, and the nearest topic
+index. Search first with `_system/bin/llmwiki search`; update an existing
+canonical article before adding a new one, and use the existing topic Base or
+`wiki/_index.md` for navigation.
 
-## Architecture: Three Layers
+For immutable `_session_research.md` captures, use the canonical
+`vault_persist.py` dry-run/save/replay flow described by the installed
+`vault-save` contract. Do not directly synthesize an `_inbox` capture. For
+ordinary reviewed article and index edits, use the vault's existing llmwiki,
+YAML, link, Base, and human-edit contracts.
+
+While this binding is active, the standalone architecture below is reference
+material only. Do not initialize `~/wiki`, add root `SCHEMA.md`, `index.md`, or
+`log.md`, create a parallel folder hierarchy, or configure Obsidian Sync.
+
+### Other environments
+
+Set a concrete wiki root with `WIKI_PATH`. If it is unset, ask for the path and
+fail closed; do not default to `~/wiki`.
+
+```bash
+test -n "$WIKI_PATH" || exit 2
+WIKI="$WIKI_PATH"
+```
+
+Outside Peter's canonical binding, the wiki is a directory of Markdown files
+that can be opened in Obsidian, VS Code, or another editor.
+
+## Standalone Architecture: Three Layers
 
 ```
 wiki/
@@ -71,14 +100,17 @@ cross-referenced by the agent.
 
 ## Resuming an Existing Wiki (CRITICAL — do this every session)
 
-When the user has an existing wiki, **always orient yourself before doing anything**:
+When the user has an existing standalone wiki, **always orient yourself before doing anything**.
+For Peter's canonical vault, use the binding and orientation files above instead
+of root `SCHEMA.md`, `index.md`, and `log.md`:
 
 ① **Read `SCHEMA.md`** — understand the domain, conventions, and tag taxonomy.
 ② **Read `index.md`** — learn what pages exist and their summaries.
 ③ **Scan recent `log.md`** — read the last 20-30 entries to understand recent activity.
 
 ```bash
-WIKI="${WIKI_PATH:-$HOME/wiki}"
+test -n "$WIKI_PATH" || exit 2
+WIKI="$WIKI_PATH"
 # Orientation reads at session start
 read_file "$WIKI/SCHEMA.md"
 read_file "$WIKI/index.md"
@@ -96,15 +128,20 @@ at hand before creating anything new.
 
 ## Initializing a New Wiki
 
-When the user asks to create or start a wiki:
+When the user asks to create or start a standalone wiki outside Peter's canonical
+vault:
 
-1. Determine the wiki path (from `$WIKI_PATH` env var, or ask the user; default `~/wiki`)
+1. Determine the wiki path from `$WIKI_PATH`, or ask the user when it is unset
 2. Create the directory structure above
 3. Ask the user what domain the wiki covers — be specific
 4. Write `SCHEMA.md` customized to the domain (see template below)
 5. Write initial `index.md` with sectioned header
 6. Write initial `log.md` with creation entry
 7. Confirm the wiki is ready and suggest first sources to ingest
+
+Never run this initialization procedure while the Peter-workstation binding is
+active. The canonical vault and its schema, indexes, Bases, and llmwiki pipeline
+already exist.
 
 ### SCHEMA.md Template
 
@@ -252,7 +289,14 @@ a `_meta/topic-map.md` that groups pages by theme for faster navigation.
 - Structure created with SCHEMA.md, index.md, log.md
 ```
 
-## Core Operations
+## Standalone Wiki Operations
+
+Everything in this section, including relative `raw/`, `entities/`,
+`concepts/`, `comparisons/`, `queries/`, `SCHEMA.md`, `index.md`, and `log.md`
+paths, applies only when the Peter-workstation binding is inactive. Under that
+binding, stop at the canonical-vault instructions above: use vault-save for raw
+session captures, configured llmwiki topics for articles, and the existing topic
+index/Base for navigation.
 
 ### 1. Ingest
 
@@ -365,7 +409,7 @@ wiki = "<WIKI_PATH>"
 
 ⑬ **Append to log.md:** `## [YYYY-MM-DD] lint | N issues found`
 
-## Working with the Wiki
+## Working with a Standalone Wiki
 
 ### Searching
 
@@ -419,6 +463,11 @@ If using the Obsidian skill alongside this one, set `OBSIDIAN_VAULT_PATH` to the
 same directory as the wiki path.
 
 ### Obsidian Headless (servers and headless machines)
+
+This section is not applicable to Peter's canonical vault. Do not install,
+create, connect, or start Obsidian Sync for that vault. On other systems, use
+this only when the user explicitly requests a new sync deployment and has
+authorized the account, remote-vault, package-install, and service changes.
 
 On machines without a display, use `obsidian-headless` instead of the desktop app.
 It syncs vaults via Obsidian Sync without a GUI — perfect for agents running on
@@ -476,10 +525,12 @@ vault in Obsidian on your laptop/phone — changes appear within seconds.
 
 ## Pitfalls
 
-- **Never modify files in `raw/`** — sources are immutable. Corrections go in wiki pages.
-- **Always orient first** — read SCHEMA + index + recent log before any operation in a new session.
+- **Peter's canonical binding wins** — the standalone paths and “always” rules
+  below do not override its AGENTS/schema/topic-index/vault-save workflow.
+- **Never modify files in standalone `raw/`** — sources are immutable. Corrections go in wiki pages.
+- **Always orient a standalone wiki first** — read SCHEMA + index + recent log before any operation in a new session.
   Skipping this causes duplicates and missed cross-references.
-- **Always update index.md and log.md** — skipping this makes the wiki degrade. These are the
+- **Always update standalone index.md and log.md** — skipping this makes the wiki degrade. These are the
   navigational backbone.
 - **Don't create pages for passing mentions** — follow the Page Thresholds in SCHEMA.md. A name
   appearing once in a footnote doesn't warrant an entity page.
@@ -492,7 +543,7 @@ vault in Obsidian on your laptop/phone — changes appear within seconds.
   200 lines. Move detailed analysis to dedicated deep-dive pages.
 - **Ask before mass-updating** — if an ingest would touch 10+ existing pages, confirm
   the scope with the user first.
-- **Rotate the log** — when log.md exceeds 500 entries, rename it `log-YYYY.md` and start fresh.
+- **Rotate a standalone log** — when log.md exceeds 500 entries, rename it `log-YYYY.md` and start fresh.
   The agent should check log size during lint.
 - **Handle contradictions explicitly** — don't silently overwrite. Note both claims with dates,
   mark in frontmatter, flag for user review.
