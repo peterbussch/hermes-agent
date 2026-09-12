@@ -3140,6 +3140,16 @@ def cmd_chat(args):
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
+    # ``chat -q`` is a finite request/response process. It exits after this
+    # turn and never drains the async completion queue, so detached tool work
+    # (notably top-level delegate_task fan-out) has no return channel. Bind the
+    # existing stateless capability before the agent starts so those tools use
+    # their synchronous fallback and return completed results in this turn.
+    if getattr(args, "query", None) is not None:
+        from gateway.session_context import declare_stateless_channel
+
+        declare_stateless_channel()
+
     _pin_kanban_board_env()
     _confirm_startup_expensive_model_override(args)
 
