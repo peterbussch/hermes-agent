@@ -152,6 +152,15 @@ def test_capture_active_tool_dependencies_uses_tools_status_probes(monkeypatch):
     assert m._capture_active_tool_dependencies() == ["ddgs", "langfuse"]
 
 
+def test_playwright_is_restorable_after_managed_dependency_sync():
+    from hermes_cli import tools_config_post_setup
+
+    assert tools_config_post_setup.restorable_python_tool_dependency("playwright") == (
+        "playwright",
+        ("playwright==1.61.0",),
+    )
+
+
 def test_restore_active_tool_dependencies_uses_static_allowlist(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -265,7 +274,6 @@ def test_cmd_update_captures_and_propagates_pre_rebuild_snapshot(
             expected_env,
         )
     ]
-
 
 
 

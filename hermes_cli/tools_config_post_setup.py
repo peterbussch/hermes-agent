@@ -432,7 +432,9 @@ def _module_installed(module_name: str) -> bool:
 _RESTORABLE_PYTHON_TOOL_DEPENDENCIES: dict[str, tuple[str, tuple[str, ...]]] = {
     **{key: (spec["module"], tuple(a for a in spec["args"] if a != "--quiet"))
        for key, spec in _PIP_POST_SETUP_HOOKS.items()},
-    "langfuse": ("langfuse", ("langfuse",))}
+    "langfuse": ("langfuse", ("langfuse",)),
+    "playwright": ("playwright", ("playwright==1.61.0",)),
+}
 
 
 def active_restorable_python_tool_dependencies() -> list[str]:
