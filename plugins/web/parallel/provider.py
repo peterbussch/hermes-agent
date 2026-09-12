@@ -1,33 +1,12 @@
-"""Parallel.ai web search + content extraction — plugin form.
+"""Parallel.ai web search and extraction via the GA SDK.
 
-Subclasses :class:`agent.web_search_provider.WebSearchProvider`. Uses two
-distinct Parallel SDK clients:
-
-- ``Parallel`` (sync)        — for :meth:`search`
-- ``AsyncParallel`` (async)  — for :meth:`extract`
-
-This is the first plugin to exercise the **async-extract** code path in
-the ABC: :meth:`extract` is declared ``async def``, and the dispatcher
-in :func:`tools.web_tools.web_extract_tool` detects coroutines via
-:func:`inspect.iscoroutinefunction` and awaits.
-
-Config keys this provider responds to::
-
-    web:
-      search_backend: "parallel"      # explicit per-capability
-      extract_backend: "parallel"     # explicit per-capability
-      backend: "parallel"             # shared fallback
-      # Optional explicit GA search mode: turbo|fast|basic|advanced.
-      parallel_search_mode: ""
-
-Env vars::
-
-    PARALLEL_API_KEY=...             # https://parallel.ai (required)
-    PARALLEL_SEARCH_MODE=agentic     # legacy compatibility input only
+The paid route uses ``parallel-web>=1.3.3,<2``. Anonymous keyless fallback
+remains available through Hermes' shared web-provider ring.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -35,27 +14,31 @@ import secrets
 import threading
 from typing import Any, Dict, List
 
-from agent.web_search_provider import WebSearchProvider, query_fingerprint
+from agent.web_search_provider import query_fingerprint
+from plugins.web._common import (
+    SEARCH_LIMIT_CAP,
+    BaseWebSearchProvider,
+    document,
+    keyless_extract,
+    keyless_search,
+    keyless_variant_schema,
+    lazy_ensure,
+    page_error,
+    run_extract_async,
+    run_search,
+    search_ok,
+    use_keyless,
+    web_hit,
+)
 
 logger = logging.getLogger(__name__)
 
+_MISSING_KEY = (
+    "PARALLEL_API_KEY environment variable not set. "
+    "Get your API key at https://parallel.ai"
+)
 _CLIENT_CACHE_LOCK = threading.Lock()
 _CLIENT_CACHE_FINGERPRINT_KEY = secrets.token_bytes(32)
-
-# Module-level note: the canonical cache slots ``_parallel_client`` and
-# ``_async_parallel_client`` live on :mod:`tools.web_tools` so tests that do
-# ``tools.web_tools._parallel_client = None`` between cases see fresh state.
-# The plugin reads/writes through that public module (see
-# :func:`_get_sync_client` / :func:`_get_async_client`).
-
-
-def _credential_id(api_key: str) -> bytes:
-    """Return a process-local, non-reversible identity for one API key."""
-    return hashlib.blake2b(
-        api_key.encode("utf-8"),
-        digest_size=16,
-        key=_CLIENT_CACHE_FINGERPRINT_KEY,
-    ).digest()
 
 
 def _get_parallel_env(name: str) -> str:
@@ -74,142 +57,81 @@ def _get_parallel_env(name: str) -> str:
 
 
 def _get_parallel_api_key() -> str:
-    """Resolve the active profile's API key."""
     return _get_parallel_env("PARALLEL_API_KEY")
 
 
+def _credential_id(api_key: str) -> bytes:
+    """Return a process-local, non-reversible identity for one API key."""
+    return hashlib.blake2b(
+        api_key.encode("utf-8"),
+        digest_size=16,
+        key=_CLIENT_CACHE_FINGERPRINT_KEY,
+    ).digest()
+
+
 def _ensure_parallel_sdk_installed() -> None:
-    """Trigger lazy install of the parallel SDK if it isn't present.
+    lazy_ensure("search.parallel")
 
-    Mirrors the lazy-deps pattern used by the legacy implementation.
-    Swallows benign ImportError from the lazy_deps helper itself; if the
-    SDK is genuinely missing the subsequent ``from parallel import ...``
-    raises ImportError that the caller can handle.
-    """
-    try:
-        from tools.lazy_deps import ensure as _lazy_ensure
 
-        _lazy_ensure("search.parallel", prompt=False)
-    except ImportError:
-        pass
-    except Exception as exc:  # noqa: BLE001 — surface install hint as ImportError
-        raise ImportError(str(exc))
+def _client(slot: str, identity_slot: str, cls_name: str) -> Any:
+    import tools.web_tools as web_tools
+
+    api_key = _get_parallel_api_key()
+    if not api_key:
+        raise ValueError(_MISSING_KEY)
+
+    credential_id = _credential_id(api_key)
+    with _CLIENT_CACHE_LOCK:
+        cached = getattr(web_tools, slot, None)
+        cached_id = getattr(web_tools, identity_slot, None)
+        if (
+            cached is not None
+            and isinstance(cached_id, bytes)
+            and hmac.compare_digest(cached_id, credential_id)
+        ):
+            return cached
+
+        _ensure_parallel_sdk_installed()
+        import parallel  # deliberately lazy
+
+        client = getattr(parallel, cls_name)(api_key=api_key)
+        setattr(web_tools, slot, client)
+        setattr(web_tools, identity_slot, credential_id)
+        return client
 
 
 def _get_sync_client() -> Any:
-    """Lazy-load + cache the sync Parallel client.
-
-    Cache lives on :mod:`tools.web_tools` (as ``_parallel_client``) so unit
-    tests that reset that name between cases keep working.
-    """
-    import tools.web_tools as _wt
-
-    api_key = _get_parallel_api_key()
-    if not api_key:
-        raise ValueError(
-            "PARALLEL_API_KEY environment variable not set. "
-            "Get your API key at https://parallel.ai"
-        )
-
-    credential_id = _credential_id(api_key)
-    with _CLIENT_CACHE_LOCK:
-        cached = getattr(_wt, "_parallel_client", None)
-        cached_credential_id = getattr(
-            _wt, "_parallel_client_credential_id", None
-        )
-        if (
-            cached is not None
-            and isinstance(cached_credential_id, bytes)
-            and hmac.compare_digest(cached_credential_id, credential_id)
-        ):
-            return cached
-
-        _ensure_parallel_sdk_installed()
-        from parallel import Parallel  # noqa: WPS433 — deliberately lazy
-
-        client = Parallel(api_key=api_key)
-        _wt._parallel_client = client
-        _wt._parallel_client_credential_id = credential_id
-        return client
+    return _client("_parallel_client", "_parallel_client_credential_id", "Parallel")
 
 
 def _get_async_client() -> Any:
-    """Lazy-load + cache the async Parallel client.
-
-    Cache lives on :mod:`tools.web_tools` (as ``_async_parallel_client``).
-    """
-    import tools.web_tools as _wt
-
-    api_key = _get_parallel_api_key()
-    if not api_key:
-        raise ValueError(
-            "PARALLEL_API_KEY environment variable not set. "
-            "Get your API key at https://parallel.ai"
-        )
-
-    credential_id = _credential_id(api_key)
-    with _CLIENT_CACHE_LOCK:
-        cached = getattr(_wt, "_async_parallel_client", None)
-        cached_credential_id = getattr(
-            _wt, "_async_parallel_client_credential_id", None
-        )
-        if (
-            cached is not None
-            and isinstance(cached_credential_id, bytes)
-            and hmac.compare_digest(cached_credential_id, credential_id)
-        ):
-            return cached
-
-        _ensure_parallel_sdk_installed()
-        from parallel import AsyncParallel  # noqa: WPS433 — deliberately lazy
-
-        client = AsyncParallel(api_key=api_key)
-        _wt._async_parallel_client = client
-        _wt._async_parallel_client_credential_id = credential_id
-        return client
+    return _client(
+        "_async_parallel_client",
+        "_async_parallel_client_credential_id",
+        "AsyncParallel",
+    )
 
 
 def _reset_clients_for_tests() -> None:
-    """Drop both cached clients so tests can re-instantiate cleanly.
-
-    Clears the canonical slots on :mod:`tools.web_tools` (where
-    :func:`_get_sync_client` / :func:`_get_async_client` read/write them).
-    """
-    import tools.web_tools as _wt
+    import tools.web_tools as web_tools
 
     with _CLIENT_CACHE_LOCK:
-        _wt._parallel_client = None
-        _wt._async_parallel_client = None
-        _wt._parallel_client_credential_id = None
-        _wt._async_parallel_client_credential_id = None
-
-
-# Backward-compatible aliases for the names that lived in tools.web_tools
-# before the migration (matches existing tests + external callers).
-_get_parallel_client = _get_sync_client
-_get_async_parallel_client = _get_async_client
+        web_tools._parallel_client = None
+        web_tools._async_parallel_client = None
+        web_tools._parallel_client_credential_id = None
+        web_tools._async_parallel_client_credential_id = None
 
 
 def _resolve_search_mode(
     configured_mode: str | None = None,
     legacy_env_mode: str | None = None,
 ) -> str:
-    """Resolve an explicit GA mode or migrate a legacy beta mode.
-
-    ``web.parallel_search_mode`` is authoritative when nonempty.  The legacy
-    environment input retains beta semantics, where ``fast`` meant today's
-    ``basic`` mode.  Unknown values fail closed to the historical agentic
-    behavior, represented by GA ``advanced``.
-    """
+    """Resolve an explicit GA mode or migrate a legacy beta mode."""
     configured = (configured_mode or "").lower().strip()
     if configured:
         aliases = {"agentic": "advanced", "one-shot": "basic"}
         accepted = {"turbo", "fast", "basic", "advanced", *aliases}
-        return (
-            aliases.get(configured, configured)
-            if configured in accepted
-            else "advanced"
-        )
+        return aliases.get(configured, configured) if configured in accepted else "advanced"
 
     legacy = (legacy_env_mode or "agentic").lower().strip()
     return {
@@ -219,52 +141,35 @@ def _resolve_search_mode(
     }.get(legacy, "advanced")
 
 
-class ParallelWebSearchProvider(WebSearchProvider):
-    """Parallel.ai search + async extract provider."""
+class ParallelWebSearchProvider(BaseWebSearchProvider):
+    """Parallel.ai GA search + async extract provider."""
 
-    @property
-    def name(self) -> str:
-        return "parallel"
-
-    @property
-    def display_name(self) -> str:
-        return "Parallel"
+    NAME = "parallel"
+    DISPLAY_NAME = "Parallel"
+    KEY_ENV = "PARALLEL_API_KEY"
+    EXTRACT = True
+    KEYLESS = True
 
     def is_available(self) -> bool:
-        """Return True when ``PARALLEL_API_KEY`` is set to a non-empty value."""
         return bool(_get_parallel_api_key())
 
-    def supports_search(self) -> bool:
-        return True
-
-    def supports_extract(self) -> bool:
-        return True
-
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
-        """Execute a Parallel search (sync).
+        def _body() -> Dict[str, Any]:
+            api_key = _get_parallel_api_key()
+            if use_keyless("parallel", api_key):
+                return keyless_search("Parallel", "parallel", query, limit, logger)
 
-        Uses the direct GA ``search`` endpoint.  An explicit
-        ``web.parallel_search_mode`` wins; otherwise the profile-scoped legacy
-        ``PARALLEL_SEARCH_MODE`` value is migrated to its GA equivalent.
-        Limit is capped at 20 server-side.
-        """
-        try:
-            from tools.interrupt import is_interrupted
-
-            if is_interrupted():
-                return {"success": False, "error": "Interrupted"}
-
-            import tools.web_tools as _wt
+            import tools.web_tools as web_tools
 
             configured_mode = (
-                _wt._load_web_config().get("parallel_search_mode") or ""
+                web_tools._load_web_config().get("parallel_search_mode") or ""
             )
             legacy_env_mode = None
             if not configured_mode.strip():
                 legacy_env_mode = _get_parallel_env("PARALLEL_SEARCH_MODE")
             mode = _resolve_search_mode(configured_mode, legacy_env_mode)
             logger.info(
-                "Parallel search: query_sha256=%s (mode=%s, limit=%d)",
+                "Parallel search query_sha256=%s (mode=%s, limit=%d)",
                 query_fingerprint(query)[:12],
                 mode,
                 limit,
@@ -273,110 +178,87 @@ class ParallelWebSearchProvider(WebSearchProvider):
                 search_queries=[query],
                 objective=query,
                 mode=mode,
-                advanced_settings={"max_results": min(limit, 20)},
+                advanced_settings={"max_results": min(limit, SEARCH_LIMIT_CAP)},
+            )
+            return search_ok(
+                [
+                    web_hit(
+                        result.url or "",
+                        result.title or "",
+                        " ".join(result.excerpts or []),
+                        index + 1,
+                    )
+                    for index, result in enumerate(response.results or [])
+                ]
             )
 
-            web_results = []
-            for i, result in enumerate(response.results or []):
-                excerpts = result.excerpts or []
-                web_results.append(
-                    {
-                        "url": result.url or "",
-                        "title": result.title or "",
-                        "description": " ".join(excerpts) if excerpts else "",
-                        "position": i + 1,
-                    }
+        return run_search("Parallel", logger, _body, sdk=True)
+
+    async def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
+        async def _body() -> List[Dict[str, Any]]:
+            api_key = _get_parallel_api_key()
+            if use_keyless("parallel", api_key):
+                return await asyncio.to_thread(
+                    keyless_extract, "Parallel", "parallel", urls, logger
                 )
-
-            return {"success": True, "data": {"web": web_results}}
-        except ValueError as exc:
-            return {"success": False, "error": str(exc)}
-        except ImportError as exc:
-            return {
-                "success": False,
-                "error": f"Parallel SDK not installed: {exc}",
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Parallel search error: %s", exc)
-            return {"success": False, "error": f"Parallel search failed: {exc}"}
-
-    async def extract(
-        self, urls: List[str], **kwargs: Any
-    ) -> List[Dict[str, Any]]:
-        """Extract content from one or more URLs via the async SDK.
-
-        Returns the legacy list-of-results shape that
-        :func:`tools.web_tools.web_extract_tool` expects: one entry per
-        successful URL plus one entry per failed URL with an ``error``
-        field. Errors are not raised — they're returned as per-URL items.
-        """
-        try:
-            from tools.interrupt import is_interrupted
-
-            if is_interrupted():
-                return [
-                    {"url": u, "error": "Interrupted", "title": ""} for u in urls
-                ]
-
             logger.info("Parallel extract: %d URL(s)", len(urls))
             response = await _get_async_client().extract(
                 urls=urls,
                 advanced_settings={"full_content": True},
             )
-
-            results: List[Dict[str, Any]] = []
-            for result in response.results or []:
-                content = result.full_content or ""
-                if not content:
-                    content = "\n\n".join(result.excerpts or [])
-                url = result.url or ""
-                title = result.title or ""
-                results.append(
-                    {
-                        "url": url,
-                        "title": title,
-                        "content": content,
-                        "raw_content": content,
-                        "metadata": {"sourceURL": url, "title": title},
-                    }
+            results = [
+                document(
+                    result.url or "",
+                    result.title or "",
+                    result.full_content or "\n\n".join(result.excerpts or []),
                 )
-
-            for error in response.errors or []:
-                results.append(
-                    {
-                        "url": error.url or "",
-                        "title": "",
-                        "content": "",
-                        "error": error.content or error.error_type or "extraction failed",
-                        "metadata": {"sourceURL": error.url or ""},
-                    }
-                )
-
-            return results
-        except ValueError as exc:
-            return [{"url": u, "title": "", "content": "", "error": str(exc)} for u in urls]
-        except ImportError as exc:
-            return [
-                {"url": u, "title": "", "content": "", "error": f"Parallel SDK not installed: {exc}"}
-                for u in urls
+                for result in response.results or []
             ]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Parallel extract error: %s", exc)
-            return [
-                {"url": u, "title": "", "content": "", "error": f"Parallel extract failed: {exc}"}
-                for u in urls
+            return results + [
+                {
+                    **page_error(
+                        error.url or "",
+                        error.content or error.error_type or "extraction failed",
+                    ),
+                    "metadata": {"sourceURL": error.url or ""},
+                }
+                for error in response.errors or []
             ]
+
+        return await run_extract_async("Parallel", logger, urls, _body, sdk=True)
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "Parallel",
-            "badge": "paid",
-            "tag": "Objective-tuned search + parallel page extraction.",
-            "env_vars": [
-                {
-                    "key": "PARALLEL_API_KEY",
-                    "prompt": "Parallel API key",
-                    "url": "https://parallel.ai",
-                },
-            ],
-        }
+        return keyless_variant_schema(
+            "Parallel",
+            "PARALLEL_API_KEY",
+            "https://parallel.ai",
+            free_tag=(
+                "Objective-tuned search + page extraction on Parallel's anonymous "
+                "free tier. Rate-limited under burst load."
+            ),
+            paid_tag=(
+                "Objective-tuned search + parallel page extraction via the "
+                "Parallel GA SDK. Unthrottled, guaranteed service."
+            ),
+        )
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+_PLUGIN_COMPAT_LAZY = {
+    "WebSearchProvider": ("agent.web_search_provider", "WebSearchProvider"),
+}
+
+
+def __getattr__(name):
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    from hermes_cli.plugin_compat import warn_once
+
+    warn_once(__name__, name, *target)
+    return getattr(importlib.import_module(target[0]), target[1])
+
+
+# ---- END PLUGIN-COMPAT ----

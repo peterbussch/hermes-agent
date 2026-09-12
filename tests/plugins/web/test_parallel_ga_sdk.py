@@ -67,6 +67,13 @@ def isolated_parallel_client_cache(monkeypatch):
     secret_scope.set_multiplex_active(original_multiplex)
 
 
+@pytest.fixture
+def paid_parallel_path(monkeypatch):
+    """Keep paid-path unit tests off upstream's anonymous network fallback."""
+    monkeypatch.setattr(provider, "_get_parallel_api_key", lambda: "test-key")
+    monkeypatch.setattr(provider, "use_keyless", lambda *_args: False)
+
+
 _CLIENT_CACHE_VARIANTS = [
     ("_get_sync_client", "_parallel_client", "_parallel_client_credential_id"),
     (
@@ -283,7 +290,7 @@ def test_scoped_legacy_mode_wins_over_conflicting_process_mode(
     assert client.search.call_args.kwargs["mode"] == "basic"
 
 
-def test_unscoped_process_legacy_mode_remains_compatible(monkeypatch):
+def test_unscoped_process_legacy_mode_remains_compatible(monkeypatch, paid_parallel_path):
     """Catch ordinary single-profile process-mode compatibility regressing."""
     client = Mock(spec=Parallel)
     client.search.return_value = SearchResult(
@@ -310,7 +317,7 @@ def test_unscoped_process_legacy_mode_remains_compatible(monkeypatch):
     assert client.search.call_args.kwargs["mode"] == "basic"
 
 
-def test_search_uses_ga_client_and_advanced_settings(monkeypatch):
+def test_search_uses_ga_client_and_advanced_settings(monkeypatch, paid_parallel_path):
     """Catch a beta call or max_results placed outside advanced_settings."""
     client = Mock(spec=Parallel)
     client.search.return_value = SearchResult(
@@ -354,7 +361,7 @@ def test_search_uses_ga_client_and_advanced_settings(monkeypatch):
     )
 
 
-def test_search_reads_legacy_mode_through_profile_config(monkeypatch):
+def test_search_reads_legacy_mode_through_profile_config(monkeypatch, paid_parallel_path):
     """Catch direct os.environ lookup or legacy fast becoming GA fast."""
     client = Mock(spec=Parallel)
     client.search.return_value = SearchResult(
@@ -386,7 +393,7 @@ def test_search_reads_legacy_mode_through_profile_config(monkeypatch):
     assert client.search.call_args.kwargs["mode"] == "basic"
 
 
-def test_search_explicit_ga_mode_wins_and_limit_remains_capped(monkeypatch):
+def test_search_explicit_ga_mode_wins_and_limit_remains_capped(monkeypatch, paid_parallel_path):
     """Catch an explicit GA fast mode being masked or the legacy 20-result cap vanishing."""
     client = Mock(spec=Parallel)
     client.search.return_value = SearchResult(
@@ -421,7 +428,7 @@ def test_search_explicit_ga_mode_wins_and_limit_remains_capped(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_extract_uses_ga_async_client_and_advanced_settings(monkeypatch):
+async def test_extract_uses_ga_async_client_and_advanced_settings(monkeypatch, paid_parallel_path):
     """Catch a beta call or full_content placed outside advanced_settings."""
     client = Mock(spec=AsyncParallel)
     client.extract = AsyncMock(
@@ -447,7 +454,7 @@ async def test_extract_uses_ga_async_client_and_advanced_settings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_extract_preserves_content_fallback_and_per_url_errors(monkeypatch):
+async def test_extract_preserves_content_fallback_and_per_url_errors(monkeypatch, paid_parallel_path):
     """Catch GA response adaptation dropping excerpts, metadata, or URL errors."""
     client = Mock(spec=AsyncParallel)
     client.extract = AsyncMock(
@@ -553,7 +560,7 @@ async def test_extract_preserves_interrupt_contract_without_constructing_client(
     ]
 
 
-def test_search_preserves_provider_failure_envelope(monkeypatch):
+def test_search_preserves_provider_failure_envelope(monkeypatch, paid_parallel_path):
     """Catch SDK exceptions escaping or losing the Parallel search error class."""
     client = Mock(spec=Parallel)
     client.search.side_effect = RuntimeError("transport unavailable")
@@ -571,7 +578,7 @@ def test_search_preserves_provider_failure_envelope(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_extract_preserves_per_url_provider_failure_envelope(monkeypatch):
+async def test_extract_preserves_per_url_provider_failure_envelope(monkeypatch, paid_parallel_path):
     """Catch SDK exceptions escaping or dropping requested URLs from failures."""
     client = Mock(spec=AsyncParallel)
     client.extract = AsyncMock(side_effect=RuntimeError("transport unavailable"))

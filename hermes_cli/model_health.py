@@ -25,7 +25,7 @@ def model_health_cache_path() -> Path:
 def load_model_health() -> dict[str, dict]:
     path = model_health_cache_path()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
     models = data.get("models") if isinstance(data, dict) else None

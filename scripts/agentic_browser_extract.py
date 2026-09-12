@@ -121,7 +121,8 @@ def _browser_tool_extract_one(url: str, limit_chars: int) -> dict[str, Any]:
     """Use Hermes' built-in browser stack as the bounded second renderer."""
     task_id = f"agentic-browser-extract-{uuid.uuid4().hex[:12]}"
     try:
-        from tools.browser_tool import browser_console, browser_navigate, cleanup_browser
+        from tools.browser_tool import browser_console, browser_navigate
+        from tools.browser_tool_lifecycle import cleanup_browser
 
         nav = json.loads(browser_navigate(url, task_id=task_id))
         if not nav.get("success"):

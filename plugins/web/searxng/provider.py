@@ -1,172 +1,93 @@
-"""SearXNG search — plugin form.
+"""SearXNG search via a user-hosted instance (``/search?format=json``).
 
-Subclasses :class:`agent.web_search_provider.WebSearchProvider`. Same JSON
-API call (``/search?format=json``), same result normalization. The legacy
-in-tree module ``tools.web_providers.searxng`` was removed in the same
-commit that moved this code under ``plugins/``; this file is now the
-canonical implementation.
-
-Search-only — SearXNG aggregates results from upstream engines but does not
-fetch/extract arbitrary URLs. ``supports_extract()`` returns False.
-
-Config keys this provider responds to::
-
-    web:
-      search_backend: "searxng"     # explicit per-capability
-      backend: "searxng"            # shared fallback
-
-Env var::
-
-    SEARXNG_URL=http://localhost:8080
+Search-only — SearXNG aggregates upstream engines but does not fetch URLs.
+Env: ``SEARXNG_URL=http://localhost:8080``.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict
 
-from agent.web_search_provider import WebSearchProvider, query_fingerprint
+import httpx
+
+from agent.web_search_provider import query_fingerprint
+from plugins.web._common import BaseWebSearchProvider, provider_env, search_fail, setup_schema
 
 logger = logging.getLogger(__name__)
 
 
-def _searxng_url() -> str:
-    """Return SEARXNG_URL from Hermes config-aware env, falling back to process env."""
-    try:
-        from hermes_cli.config import get_env_value
-
-        val = get_env_value("SEARXNG_URL")
-    except Exception:
-        val = None
-    if val is None:
-        val = os.getenv("SEARXNG_URL", "")
-    return (val or "").strip()
-
-
-class SearXNGWebSearchProvider(WebSearchProvider):
+class SearXNGWebSearchProvider(BaseWebSearchProvider):
     """Search via a user-hosted SearXNG instance."""
 
-    @property
-    def name(self) -> str:
-        return "searxng"
-
-    @property
-    def display_name(self) -> str:
-        return "SearXNG"
-
-    def is_available(self) -> bool:
-        """Return True when ``SEARXNG_URL`` is set."""
-        return bool(_searxng_url())
-
-    def supports_search(self) -> bool:
-        return True
-
-    def supports_extract(self) -> bool:
-        return False
+    NAME = "searxng"
+    DISPLAY_NAME = "SearXNG"
+    KEY_ENV = "SEARXNG_URL"
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
-        """Execute a search against the configured SearXNG instance."""
-        import httpx
-
-        base_url = _searxng_url().rstrip("/")
+        base_url = provider_env("SEARXNG_URL").rstrip("/")
         if not base_url:
-            return {"success": False, "error": "SEARXNG_URL is not set"}
-
-        params: Dict[str, Any] = {
-            "q": query,
-            "format": "json",
-            "pageno": 1,
-        }
-
+            return search_fail("SEARXNG_URL is not set")
+        query_sha256 = query_fingerprint(query)
         try:
-            resp = httpx.get(
-                f"{base_url}/search",
-                params=params,
-                timeout=15,
-                headers={"Accept": "application/json"},
+            response = httpx.get(
+                f"{base_url}/search", params={"q": query, "format": "json", "pageno": 1},
+                headers={"Accept": "application/json"}, timeout=15,
             )
-            resp.raise_for_status()
+            response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "SearXNG HTTP error: status=%d query_sha256=%s",
-                exc.response.status_code,
-                query_fingerprint(query)[:12],
-            )
-            return {
-                "success": False,
-                "error": f"SearXNG returned HTTP {exc.response.status_code}",
-            }
+            logger.warning("SearXNG HTTP error: status=%d query_sha256=%s", exc.response.status_code, query_sha256[:12])
+            return search_fail(f"SearXNG returned HTTP {exc.response.status_code}")
         except httpx.RequestError as exc:
-            logger.warning(
-                "SearXNG request error: type=%s query_sha256=%s",
-                type(exc).__name__,
-                query_fingerprint(query)[:12],
-            )
-            return {
-                "success": False,
-                "error": (
-                    f"Could not reach SearXNG at {base_url} "
-                    f"({type(exc).__name__})"
-                ),
-            }
-
+            logger.warning("SearXNG request error: type=%s query_sha256=%s", type(exc).__name__, query_sha256[:12])
+            return search_fail(f"Could not reach SearXNG at {base_url} ({type(exc).__name__})")
         try:
-            data = resp.json()
+            data = response.json()
         except Exception as exc:  # noqa: BLE001
             logger.warning("SearXNG response parse error: %s", exc)
-            return {
-                "success": False,
-                "error": "Could not parse SearXNG response as JSON",
-            }
-
+            return search_fail("Could not parse SearXNG response as JSON")
         raw_results = data.get("results", [])
-
         # SearXNG may return a score field; sort descending and cap to limit.
-        sorted_results = sorted(
-            raw_results,
-            key=lambda r: float(r.get("score", 0)),
-            reverse=True,
-        )[:limit]
-
+        sorted_results = sorted(raw_results, key=lambda r: float(r.get("score", 0)), reverse=True)[:limit]
         web_results = [
             {
-                "title": str(r.get("title", "")),
-                "url": str(r.get("url", "")),
-                "description": str(r.get("content", "")),
-                "position": i + 1,
-                "engine": str(r.get("engine", "")),
-                "engines": [str(engine) for engine in (r.get("engines") or [])],
+                "title": str(row.get("title", "")), "url": str(row.get("url", "")),
+                "description": str(row.get("content", "")), "position": index + 1,
+                "engine": str(row.get("engine", "")),
+                "engines": [str(engine) for engine in (row.get("engines") or [])],
             }
-            for i, r in enumerate(sorted_results)
+            for index, row in enumerate(sorted_results)
         ]
-
-        logger.info(
-            "SearXNG search query_sha256=%s: %d results (from %d raw, limit %d)",
-            query_fingerprint(query)[:12],
-            len(web_results),
-            len(raw_results),
-            limit,
-        )
-
-        return {
-            "success": True,
-            "data": {
-                "web": web_results,
-                "unresponsive_engines": data.get("unresponsive_engines", []),
-            },
-        }
+        logger.info("SearXNG search query_sha256=%s: %d results (from %d raw, limit %d)",
+                    query_sha256[:12], len(web_results), len(raw_results), limit)
+        return {"success": True, "data": {"web": web_results,
+                                               "unresponsive_engines": data.get("unresponsive_engines", [])}}
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "SearXNG",
-            "badge": "free · self-hosted",
-            "tag": "Free, privacy-respecting metasearch. Point SEARXNG_URL at your instance.",
-            "env_vars": [
-                {
-                    "key": "SEARXNG_URL",
-                    "prompt": "SearXNG instance URL (e.g. http://localhost:8080)",
-                    "url": "https://searx.space/",
-                },
-            ],
-        }
+        return setup_schema(
+            "SearXNG", "free · self-hosted", "Free, privacy-respecting metasearch. Point SEARXNG_URL at your instance.",
+            "SEARXNG_URL", "SearXNG instance URL (e.g. http://localhost:8080)", "https://searx.space/",
+        )
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+import os  # noqa: F401,E402
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'WebSearchProvider': ('agent.web_search_provider', 'WebSearchProvider'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    from hermes_cli.plugin_compat import warn_once
+    warn_once(__name__, name, *target)
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

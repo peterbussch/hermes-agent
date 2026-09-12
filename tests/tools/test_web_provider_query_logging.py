@@ -18,6 +18,7 @@ def test_exa_routine_log_fingerprints_query(monkeypatch, caplog):
 
     client = SimpleNamespace(search=lambda *_args, **_kwargs: SimpleNamespace(results=[]))
     monkeypatch.setattr(provider, "_get_exa_client", lambda: client)
+    monkeypatch.setattr(provider, "use_keyless", lambda *_args: False)
     query = "sensitive exa marker"
 
     with caplog.at_level(logging.INFO, logger=provider.logger.name):
@@ -30,6 +31,7 @@ def test_tavily_routine_log_fingerprints_query(monkeypatch, caplog):
     from plugins.web.tavily import provider
 
     monkeypatch.setattr(provider, "_tavily_request", lambda *_args, **_kwargs: {"results": []})
+    monkeypatch.setattr(provider, "_auth", lambda _action: ("test-key", None, ""))
     query = "sensitive tavily marker"
 
     with caplog.at_level(logging.INFO, logger=provider.logger.name):
@@ -43,6 +45,7 @@ def test_firecrawl_routine_log_fingerprints_query(monkeypatch, caplog):
 
     client = SimpleNamespace(search=lambda **_kwargs: {"web": []})
     monkeypatch.setattr(provider, "_get_firecrawl_client", lambda: client)
+    monkeypatch.setattr(provider, "_use_keyless_ring", lambda: False)
     query = "sensitive firecrawl marker"
 
     with caplog.at_level(logging.INFO, logger=provider.logger.name):
@@ -56,6 +59,8 @@ def test_parallel_routine_log_fingerprints_query(monkeypatch, caplog):
 
     client = SimpleNamespace(search=lambda **_kwargs: SimpleNamespace(results=[]))
     monkeypatch.setattr(provider, "_get_sync_client", lambda: client)
+    monkeypatch.setattr(provider, "_get_parallel_api_key", lambda: "test-key")
+    monkeypatch.setattr(provider, "use_keyless", lambda *_args: False)
     query = "sensitive parallel marker"
 
     with caplog.at_level(logging.INFO, logger=provider.logger.name):
@@ -146,6 +151,11 @@ def test_dispatcher_provider_exception_does_not_retain_query(monkeypatch):
     register_provider(FailingProvider())
     monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
     monkeypatch.setattr(web_tools, "_get_search_backend", lambda: "echo-failure")
+    monkeypatch.setattr(
+        web_tools,
+        "_load_web_config",
+        lambda: {"backend": "echo-failure", "keyless_rescue": False},
+    )
     monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
 
     try:

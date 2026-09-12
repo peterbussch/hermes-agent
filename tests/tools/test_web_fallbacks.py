@@ -406,8 +406,7 @@ def test_extract_retries_only_unusable_urls_and_preserves_order(monkeypatch):
     result = json.loads(asyncio.run(web_tools.web_extract_tool([url_a, url_b])))
 
     assert calls == [
-        ("jina", [url_a]),
-        ("jina", [url_b]),
+        ("jina", [url_a, url_b]),
         ("local_browser", [url_b]),
     ]
     assert [item["url"] for item in result["results"]] == [url_a, url_b]
