@@ -726,8 +726,18 @@ class _ChildRun:
         if diagnostic_path:
             _err += f" Diagnostic: {diagnostic_path}"
         status = "timeout" if is_timeout else "error"
+        partial_summary: Optional[str] = None
+        live_transcript_path = str(
+            getattr(child, "_live_transcript_path", "") or ""
+        ).strip()
+        if is_timeout and child_api_calls > 0 and live_transcript_path:
+            partial_summary = (
+                f"Partial subagent progress is available after {child_api_calls} API calls. "
+                f"Recover it from the live transcript: {live_transcript_path}"
+            )
         _error_entry = {
-            "task_index": task_index, "status": status, "summary": None, "error": _err, "exit_reason": status,
+            "task_index": task_index, "status": status, "summary": partial_summary,
+            "error": _err, "exit_reason": status,
             "api_calls": child_api_calls, "duration_seconds": duration,
             "timeout_seconds": child_timeout if is_timeout else None,
             "timed_out_after_seconds": duration if is_timeout else None,
@@ -735,7 +745,23 @@ class _ChildRun:
             "_child_role": getattr(child, "_delegate_role", None),
             "diagnostic_path": diagnostic_path,
         }
-        self.finish_failed(_error_entry, _late_pending_steer, preview=f"Timed out after {duration}s" if is_timeout else str(exc))
+        if partial_summary:
+            _error_entry.update({
+                "partial": True,
+                "partial_salvage": {
+                    "status": "available",
+                    "reason": "timeout_after_progress",
+                    "api_calls_completed": child_api_calls,
+                    "artifact_paths": [live_transcript_path],
+                    "requires_synthesis": True,
+                },
+            })
+        self.finish_failed(
+            _error_entry,
+            _late_pending_steer,
+            preview=f"Timed out after {duration}s" if is_timeout else str(exc),
+            summary=partial_summary or "",
+        )
         close_deferred = is_timeout and not future.done()
         if close_deferred:
             _defer_close_after_timeout(child, future)

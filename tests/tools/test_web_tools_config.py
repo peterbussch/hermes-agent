@@ -456,7 +456,14 @@ class TestWebSearchSchema:
         # tool dispatcher resolves a provider from the registry and calls
         # provider.search(query, limit). Mock the provider lookup so we can
         # assert the limit is clamped before reaching the backend.
-        fake_search = MagicMock(return_value={"success": True, "data": {"web": []}})
+        web_result = {
+            "title": "Hermes documentation",
+            "url": "https://example.test/hermes-docs",
+            "description": "Official Hermes documentation and usage reference.",
+        }
+        fake_search = MagicMock(
+            return_value={"success": True, "data": {"web": [web_result]}}
+        )
         fake_provider = MagicMock(
             name="ParallelWebSearchProvider",
             supports_search=MagicMock(return_value=True),
@@ -471,7 +478,10 @@ class TestWebSearchSchema:
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("docs", limit=500))
 
-        assert result == {"success": True, "data": {"web": []}}
+        assert result["success"] is True
+        assert result["data"]["web"] == [web_result]
+        assert result["data"]["provider"] == "parallel"
+        assert result["data"]["fallback"] is False
         fake_search.assert_called_once_with("docs", 100)
 
 
@@ -499,10 +509,18 @@ class TestWebSearchErrorHandling:
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("test query", limit=3))
 
-        assert result == {"error": "Error searching web: boom"}
+        assert result == {
+            "success": False,
+            "error": "All web search providers were unusable (firecrawl: boom)",
+            "provider": None,
+            "fallback": False,
+            "provenance": [
+                {"provider": "firecrawl", "status": "error", "error": "boom"}
+            ],
+        }
 
         debug_payload = mock_log_call.call_args.args[1]
-        assert debug_payload["error"] == "Error searching web: boom"
+        assert debug_payload["error"] == result["error"]
         assert "traceback" not in debug_payload["error"]
         assert "exception_type" not in debug_payload["error"]
         assert "config" not in result

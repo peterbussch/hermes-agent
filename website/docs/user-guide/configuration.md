@@ -2516,16 +2516,7 @@ web:
 
 **Self-hosted Firecrawl:** Set `FIRECRAWL_API_URL` to point at your own instance. When a custom URL is set, the API key becomes optional (set `USE_DB_AUTHENTICATION=*** on the server to disable auth).
 
-**Parallel search modes:** Set `web.parallel_search_mode` in `config.yaml` to
-one of the GA values `turbo`, `fast`, `basic`, or `advanced`. A nonempty
-config value takes precedence. If it is empty, Hermes preserves an existing
-profile-scoped `PARALLEL_SEARCH_MODE` value with the migration mapping
-`fast -> basic`, `one-shot -> basic`, and `agentic -> advanced`; with neither
-setting, the mode is `advanced`. Keep only the secret `PARALLEL_API_KEY` in
-`.env` — `PARALLEL_SEARCH_MODE` is a compatibility input, not the setting for
-new configurations. The adapter uses the direct `parallel-web` 1.3.3 GA
-`Parallel.search` and `AsyncParallel.extract` methods rather than the retired
-beta API.
+**Parallel search modes:** Set `PARALLEL_SEARCH_MODE` to control search behavior — `fast`, `one-shot`, or `agentic` (default: `agentic`).
 
 **Exa:** Set `EXA_API_KEY` in `~/.hermes/.env`. Supports `category` filtering (`company`, `research paper`, `news`, `people`, `personal site`, `pdf`) and domain/date filters.
 

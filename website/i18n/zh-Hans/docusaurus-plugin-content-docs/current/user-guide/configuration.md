@@ -1524,15 +1524,7 @@ web:
 
 **自托管 Firecrawl：** 设置 `FIRECRAWL_API_URL` 指向您自己的实例。设置自定义 URL 后，API 密钥变为可选（在服务器上设置 `USE_DB_AUTHENTICATION=***` 以禁用认证）。
 
-**Parallel 搜索模式：** 在 `config.yaml` 中将
-`web.parallel_search_mode` 设为 GA 值 `turbo`、`fast`、`basic` 或
-`advanced`。非空的配置值具有最高优先级；如果该值为空，Hermes 会按旧
-语义迁移当前 profile 中已有的 `PARALLEL_SEARCH_MODE`：`fast -> basic`、
-`one-shot -> basic`、`agentic -> advanced`。如果两者都未设置，则使用
-`advanced`。`.env` 中只应保存机密值 `PARALLEL_API_KEY`；
-`PARALLEL_SEARCH_MODE` 仅用于兼容旧配置，不是新配置的入口。适配器使用
-`parallel-web` 1.3.3 GA 的 `Parallel.search` 和
-`AsyncParallel.extract` 直接方法，不再使用已弃用的 beta API。
+**Parallel 搜索模式：** 设置 `PARALLEL_SEARCH_MODE` 控制搜索行为 —— `fast`、`one-shot` 或 `agentic`（默认：`agentic`）。
 
 **Exa：** 在 `~/.hermes/.env` 中设置 `EXA_API_KEY`。支持 `category` 过滤（`company`、`research paper`、`news`、`people`、`personal site`、`pdf`）和域名/日期过滤器。
 

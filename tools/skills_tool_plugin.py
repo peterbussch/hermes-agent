@@ -141,6 +141,9 @@ def _serve_plugin_skill(
                      readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
     if file_path:
         return _serve_skill_file(skill_md.parent, file_path, qualified_name, read_error_prefix=True)
+    readiness, readiness_extras = _st._skill_readiness(
+        parsed_frontmatter, qualified_name
+    )
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         logger.warning(
             "Plugin skill '%s:%s' contains patterns that may indicate prompt injection", namespace, bare)
@@ -157,7 +160,8 @@ def _serve_plugin_skill(
         "success": True, "name": qualified_name, "content": banner + rendered_content,
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),
         "linked_files": _plugin_skill_linked_files(skill_md.parent),
-        "readiness_status": SkillReadinessStatus.AVAILABLE.value})
+        **readiness,
+        **readiness_extras})
 
 
 def _plugin_skill_linked_files(skill_root: Path) -> Dict[str, List[str]] | None:

@@ -2339,6 +2339,9 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     normalized = _norm(tool_name)
     if normalized in agent.valid_tool_names:
         return normalized
+    semantic_alias = {"search_web": "web_search"}.get(normalized)
+    if semantic_alias in agent.valid_tool_names:
+        return semantic_alias
     cands: set[str] = {tool_name, lowered, normalized, _camel_snake(tool_name)}
     for _ in range(2):  # strip trailing tool-suffix up to twice (TodoTool_tool needs it)
         extra: set[str] = set()

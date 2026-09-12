@@ -244,12 +244,24 @@ def _validate_model_config(config_path, issues: list) -> None:
                         f"model.provider '{provider_raw}' is unknown. Valid providers: {known_list}. "
                         f"Fix: run 'hermes config set model.provider <valid_provider>'", issues)
     policy_id = str(runtime_provider or catalog_provider or "").strip().lower()
-    accepts_vendor_slug = policy_id in _VENDOR_SLUG_PROVIDERS or policy_id == "custom" or policy_id.startswith("custom:")
     user_providers = cfg.get("providers")
-    if isinstance(user_providers, dict):
-        configured_provider = user_providers.get(policy_id)
-        if isinstance(configured_provider, dict) and str(configured_provider.get("base_url") or "").strip():
-            accepts_vendor_slug = True
+    user_provider = next(
+        (
+            entry
+            for name, entry in user_providers.items()
+            if str(name).strip().lower() == provider
+        ),
+        None,
+    ) if isinstance(user_providers, dict) else None
+    user_gateway = isinstance(user_provider, dict) and bool(
+        str(user_provider.get("base_url") or "").strip()
+    )
+    accepts_vendor_slug = (
+        policy_id in _VENDOR_SLUG_PROVIDERS
+        or policy_id == "custom"
+        or policy_id.startswith("custom:")
+        or user_gateway
+    )
     if default_model and "/" in default_model and policy_id and not accepts_vendor_slug:
         check_warn(f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
                    "(vendor-prefixed slugs belong to aggregators like openrouter)")

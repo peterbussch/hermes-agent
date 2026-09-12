@@ -326,36 +326,6 @@ PARALLEL_API_KEY=your-parallel-key-here
 
 Get access at [parallel.ai](https://parallel.ai).
 
-Choose the search mode in `config.yaml`. The accepted GA values are `turbo`,
-`fast`, `basic`, and `advanced`:
-
-```yaml
-# ~/.hermes/config.yaml
-web:
-  search_backend: "parallel"
-  extract_backend: "parallel"
-  parallel_search_mode: "advanced"
-```
-
-A nonempty `web.parallel_search_mode` is authoritative. If it is empty,
-Hermes checks the active profile's legacy `PARALLEL_SEARCH_MODE` value and
-preserves its old meaning during migration:
-
-| Legacy value | GA mode |
-|--------------|---------|
-| `fast` | `basic` |
-| `one-shot` | `basic` |
-| `agentic` | `advanced` |
-
-With neither setting, Hermes uses `advanced`. New configurations should use
-`web.parallel_search_mode`; `PARALLEL_SEARCH_MODE` is compatibility-only and
-should not be added to `.env`. Only the secret `PARALLEL_API_KEY` belongs
-there.
-
-The Parallel adapter targets the `parallel-web` 1.3.3 GA interface and calls
-`Parallel.search` and `AsyncParallel.extract` directly; it no longer uses the
-retired beta API.
-
 ---
 
 ### xAI (Grok) {#xai-grok}
