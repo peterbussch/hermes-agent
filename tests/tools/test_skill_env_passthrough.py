@@ -122,7 +122,12 @@ class TestAgentMailKeyPassthrough:
         self._install_real_skill(tmp_path, monkeypatch)
         monkeypatch.delenv("AGENTMAIL_API_KEY", raising=False)
 
-        with patch("tools.skills_tool._secret_capture_callback", None):
+        # This test isolates the optional-key contract.  The skill separately
+        # declares the CLI as a required command, so make that unrelated
+        # prerequisite available instead of letting the host PATH decide the
+        # result of this assertion.
+        with patch("tools.skills_tool._secret_capture_callback", None), \
+                patch("tools.skills_tool.shutil.which", return_value="/usr/local/bin/agentmail"):
             from tools.skills_tool import skill_view
 
             result = json.loads(skill_view(name="agentmail"))
