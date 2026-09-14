@@ -39,6 +39,46 @@ def _view(name, file_path=None, task="t-svd"):
 
 
 class TestSkillViewDedup:
+
+    def test_plugin_view_dedup_uses_source_identity(self, skills_home, monkeypatch, tmp_path):
+        """Plugin main views participate in the existing registry dedup contract."""
+        from hermes_cli import plugins
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+        from tools.registry import registry
+
+        plugin_dir = tmp_path / "plugin-skill"
+        plugin_dir.mkdir()
+        skill_md = plugin_dir / "SKILL.md"
+        skill_md.write_text(
+            "---\nname: plugin-dedup\ndescription: Plugin dedup fixture.\n---\n\nPlugin body.\n",
+            encoding="utf-8",
+        )
+        manager = PluginManager()
+        manager._discovered = True
+        ctx = PluginContext(PluginManifest(name="dedup-plugin"), manager)
+        ctx.register_skill("plugin-dedup", skill_md)
+        # Keep plugin discovery at the boundary; dispatch and the skill handler remain real.
+        monkeypatch.setattr(plugins, "discover_plugins", lambda: None)
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: manager)
+
+        first = json.loads(registry.dispatch(
+            "skill_view", {"name": "dedup-plugin:plugin-dedup"}, task_id="plugin-task"
+        ))
+        second = json.loads(registry.dispatch(
+            "skill_view", {"name": "dedup-plugin:plugin-dedup"}, task_id="plugin-task"
+        ))
+
+        assert first["success"] is True
+        assert "Plugin body." in first["content"]
+        assert second["dedup"] is True
+        assert second["content_returned"] is False
+
+        skill_md.write_text(skill_md.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+        changed = json.loads(registry.dispatch(
+            "skill_view", {"name": "dedup-plugin:plugin-dedup"}, task_id="plugin-task"
+        ))
+        assert "Changed." in changed["content"]
+        assert changed.get("dedup") is None
     def test_first_view_returns_full_content(self, skills_home):
         r = _view("demo-dedup-skill")
         assert r["success"] is True

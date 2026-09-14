@@ -160,6 +160,8 @@ def _serve_plugin_skill(
         "success": True, "name": qualified_name, "content": banner + rendered_content,
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),
         "linked_files": _plugin_skill_linked_files(skill_md.parent),
+        # Internal: absolute source path for the repeat-view dedup fingerprint.
+        "_source_path": str(skill_md),
         **readiness,
         **readiness_extras})
 

@@ -380,7 +380,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     try:
         from tools.skills_tool import _skills_dir, _get_disabled_skill_names
         from agent.skill_utils import (
-            get_external_skills_dirs, get_project_skills_dirs, iter_project_skill_files, iter_skill_index_files,
+            get_all_skills_dirs, get_project_skills_dirs, iter_project_skill_files, iter_skill_index_files,
         )
         from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
@@ -391,8 +391,13 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         # See #67277.
         skills_dir = _skills_dir()
         iters = [iter_project_skill_files(d) for d in get_project_skills_dirs()]
-        local = [skills_dir] if skills_dir.exists() else []
-        iters += [iter_skill_index_files(d, "SKILL.md") for d in local + get_external_skills_dirs()]
+        configured_dirs = get_all_skills_dirs()
+        scan_dirs = [skills_dir] if skills_dir.exists() else []
+        scan_dirs.extend(
+            d for d in configured_dirs[1:]
+            if d != skills_dir and d.exists()
+        )
+        iters += [iter_skill_index_files(d, "SKILL.md") for d in scan_dirs]
         for _iter in iters:
             for skill_md in _iter:
                 try:

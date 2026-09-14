@@ -198,11 +198,19 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
 def _skill_search_dirs() -> Tuple[list, list, Path]:
     """(project_dirs, all_dirs, active_skills_dir); trusted project-local dirs come FIRST so
     first-wins dedup / the collision resolver prefer them."""
-    from agent.skill_utils import get_external_skills_dirs, get_project_skills_dirs
+    from agent.skill_utils import get_all_skills_dirs, get_project_skills_dirs
     project_dirs = list(get_project_skills_dirs())
     active_skills_dir = _skills_dir()
-    all_dirs = project_dirs + ([active_skills_dir] if active_skills_dir.exists() else [])
-    all_dirs += get_external_skills_dirs()
+    configured_dirs = get_all_skills_dirs()
+    # ``SKILLS_DIR`` is patchable for profile-aware callers/tests, while the utility helper's
+    # first entry is the live profile-local directory. Keep the active path first and reuse the
+    # helper for create_dir/external roots.
+    all_dirs = [active_skills_dir] if active_skills_dir.exists() else []
+    all_dirs.extend(
+        d for d in configured_dirs[1:]
+        if d != active_skills_dir and d.exists()
+    )
+    all_dirs = project_dirs + all_dirs
     return project_dirs, all_dirs, active_skills_dir
 
 
@@ -228,7 +236,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
             try:
-                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md)[:4000])
+                frontmatter, body = _parse_frontmatter(_read_skill_text(skill_md))
                 if not skill_matches_platform(frontmatter) or not skill_matches_environment(frontmatter):
                     continue
                 name = frontmatter.get("name", skill_md.parent.name)[:MAX_NAME_LENGTH]

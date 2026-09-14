@@ -217,6 +217,80 @@ class TestFindAllSkills:
         assert {s["name"] for s in skills} == {"skill-a", "skill-b", "axolotl"}
         assert [s["category"] for s in skills if s["name"] == "axolotl"] == ["mlops"]
 
+    def test_configured_create_dir_is_listed_and_viewable(self, tmp_path, monkeypatch):
+        """The configured skill creation directory is part of the tool's discovery roots."""
+        home = tmp_path / ".hermes"
+        local = home / "skills"
+        create_dir = tmp_path / "created-skills"
+        local.mkdir(parents=True)
+        skill_dir = create_dir / "created-only"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: created-only\ndescription: Created outside the local root.\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        (home / "config.yaml").write_text(
+            f"skills:\n  create_dir: {create_dir}\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr("hermes_constants._hermes_home_cache", None, raising=False)
+        monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", local)
+
+        listed = json.loads(skills_list())
+        viewed = json.loads(skill_view("created-only"))
+
+        assert [skill["name"] for skill in listed["skills"]] == ["created-only"]
+        assert viewed["success"] is True
+        assert "Body." in viewed["content"]
+
+    def test_long_valid_frontmatter_is_parsed_without_truncation(self, tmp_path, monkeypatch):
+        """A valid header beyond the old preview bound remains list/view compatible."""
+        from agent.skill_commands import build_skill_invocation_message, scan_skill_commands
+
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
+            patch("agent.skill_utils.sys") as mock_sys,
+        ):
+            mock_sys.platform = "darwin"
+            filler = "x" * 5000
+            long_dir = tmp_path / "long-header"
+            long_dir.mkdir()
+            (long_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: long-header\n"
+                "description: A long valid frontmatter header.\n"
+                "platforms: [macos]\n"
+                f"filler: {filler}\n"
+                "---\n\nLong body.\n",
+                encoding="utf-8",
+            )
+            hidden_dir = tmp_path / "hidden-header"
+            hidden_dir.mkdir()
+            (hidden_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: hidden-header\n"
+                "description: Hidden on this platform.\n"
+                "platforms: [linux]\n"
+                f"filler: {filler}\n"
+                "---\n\nHidden body.\n",
+                encoding="utf-8",
+            )
+
+            listed = json.loads(skills_list())
+            viewed = json.loads(skill_view("long-header"))
+            hidden = json.loads(skill_view("hidden-header"))
+            commands = scan_skill_commands()
+            prompt = build_skill_invocation_message("/long-header")
+
+        assert {skill["name"] for skill in listed["skills"]} == {"long-header"}
+        assert viewed["success"] is True
+        assert "Long body." in viewed["content"]
+        assert hidden["success"] is False
+        assert hidden["readiness_status"] == "unsupported"
+        assert "/long-header" in commands
+        assert "/hidden-header" not in commands
+        assert prompt is not None and "Long body." in prompt
+
 
     def test_description_falls_back_to_body_and_is_truncated(self, tmp_path):
         no_desc = tmp_path / "no-desc"

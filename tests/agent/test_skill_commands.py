@@ -52,6 +52,25 @@ def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Pat
 
 class TestScanSkillCommands:
 
+    def test_configured_create_dir_is_slash_discoverable(self, tmp_path, monkeypatch):
+        """Slash scanning uses the same configured roots as the skills tool."""
+        home = tmp_path / ".hermes"
+        local = home / "skills"
+        create_dir = tmp_path / "created-skills"
+        local.mkdir(parents=True)
+        _make_skill(create_dir, "created-only", body="Created slash skill.")
+        (home / "config.yaml").write_text(
+            f"skills:\n  create_dir: {create_dir}\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setattr("hermes_constants._hermes_home_cache", None, raising=False)
+
+        with patch("tools.skills_tool.SKILLS_DIR", local):
+            result = scan_skill_commands()
+
+        assert "/created-only" in result
+        assert result["/created-only"]["skill_dir"] == str(create_dir / "created-only")
+
 
 
 
