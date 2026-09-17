@@ -264,47 +264,104 @@ def _offer_upstream_remote(git_cmd: list[str], cwd: Path, *, assume_yes: bool, i
     return True
 
 
-def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: bool = False, input_fn=None) -> bool:
-    """Offer to add ``upstream``, compare origin/main vs upstream/main, ff-pull when strictly behind, then push origin.
+# Upstream-sync outcomes. The caller renders these into the completion line, and a completion line
+# that does not start with "✓" finalizes the update as "partial" and exits non-zero
+# (``_print_verified_update_completion``) — so a sync that did not apply upstream can never be
+# reported as success. That is the whole reason this is three states and not a bool.
+UPSTREAM_STATE_CURRENT = "current"          # upstream consulted; nothing left to apply
+UPSTREAM_STATE_UNCHECKED = "unchecked"      # upstream never consulted (fork-only user; fetch failed)
+UPSTREAM_STATE_NOT_APPLIED = "not_applied"  # upstream consulted; checkout knowingly left behind
+_UPSTREAM_STATES = (UPSTREAM_STATE_CURRENT, UPSTREAM_STATE_UNCHECKED, UPSTREAM_STATE_NOT_APPLIED)
 
-    Returns True only when origin/main was actually verified against upstream/main; False when the check never
-    happened, so the caller never reports "up to date" on an origin-only compare. Fetches only upstream/main:
-    a bare fetch drags in thousands of auto-generated branches.
+
+def upstream_state_of(value) -> str:
+    """Normalize a ``_sync_with_upstream_if_needed`` return to one of ``_UPSTREAM_STATES``.
+
+    Callers written against the older bool return still work: truthy keeps the historical
+    "verified current" meaning and falsy the "never consulted" one, so an old caller — or a test
+    stand-in patched in place of the real function — is never misread as a failed sync.
+    """
+    if value in _UPSTREAM_STATES:
+        return value
+    return UPSTREAM_STATE_CURRENT if value else UPSTREAM_STATE_UNCHECKED
+
+
+def _print_upstream_not_applied(cwd: Path, behind: int) -> None:
+    """State that the checkout is still behind, where an "up to date" line would otherwise land."""
+    print(f"  ⚠ Upstream was NOT applied — this checkout is still {behind} commit(s) behind.")
+    print(f"    Your code is unchanged. Merge by hand: cd {cwd} && git merge upstream/main")
+
+
+def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: bool = False, input_fn=None) -> str:
+    """Offer to add ``upstream``, apply upstream/main to the LOCAL branch, then push origin.
+
+    Returns one of ``UPSTREAM_STATE_*``. Divergence is measured against the LOCAL branch (HEAD), not
+    the ``origin`` mirror: ``git pull``/``git merge`` move the local branch, and a fork mirror that
+    went stale before its local commits existed reports zero divergence off ``origin/main`` while the
+    branch is thousands of commits behind. Measured off the mirror, that mismatch ran an ff-only pull
+    which could never succeed, printed "✓ Up to date with your fork", and exited 0 with the code
+    unchanged for days.
+
+    Local commits survive: with any commit of our own that upstream lacks, an ff-only pull is
+    impossible, so upstream is MERGED — the reconciliation ``_reconcile_diverged_checkout`` already
+    applies to a diverged origin checkout — and a conflict aborts cleanly, leaving the tree untouched
+    and the run reported as partial rather than complete. Fetches only upstream/main: a bare fetch
+    drags in thousands of auto-generated branches.
 
     See #97052.
     """
-    from hermes_cli.update_cmd import _count_commits_between, _has_upstream_remote, _no_prompt_git_kwargs, _should_skip_upstream_prompt
+    from hermes_cli.update_cmd import (
+        _count_commits_between, _git_run, _has_upstream_remote, _no_prompt_git_kwargs,
+        _should_skip_upstream_prompt)
     if not _has_upstream_remote(git_cmd, cwd) and (
         _should_skip_upstream_prompt() or not _offer_upstream_remote(git_cmd, cwd, assume_yes=assume_yes, input_fn=input_fn)
     ):
-        return False
+        return UPSTREAM_STATE_UNCHECKED
     print("\n→ Fetching upstream...")
     try:
         subprocess.run(git_cmd + ["fetch", "upstream", "main", "--quiet"], cwd=cwd, capture_output=True, check=True, **_no_prompt_git_kwargs())
     except subprocess.CalledProcessError:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
-        return False
-    origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
+        return UPSTREAM_STATE_UNCHECKED
+    # What decides the APPLY is the local branch: ``git pull``/``git merge`` move HEAD. The origin
+    # mirror is still consulted for the fork-push messaging below, and for telling a fork that is
+    # merely ahead of its own mirror apart from one that is behind upstream.
     upstream_ahead = _count_commits_between(git_cmd, cwd, "origin/main", "upstream/main")
-    if origin_ahead < 0 or upstream_ahead < 0:
+    local_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "HEAD")
+    if upstream_ahead < 0 or local_ahead < 0:
         print("  ✗ Could not compare branches. Skipping upstream sync.")
-        return False
-    if origin_ahead > 0:
-        print(
-            f"\nℹ Your fork has {origin_ahead} commit(s) not on upstream.\n"
-            "  Skipping upstream sync to preserve your changes.\n"
-            "  If you want to merge upstream changes, run:\n    git pull upstream main"
-        )
-        return True
+        return UPSTREAM_STATE_UNCHECKED
     if upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
-        return True
-    print(f"\n→ Fork is {upstream_ahead} commit(s) behind upstream\n→ Pulling from upstream...")
-    try:
-        subprocess.run(git_cmd + ["pull", "--ff-only", "upstream", "main"], cwd=cwd, check=True, **_no_prompt_git_kwargs())
-    except subprocess.CalledProcessError:
-        print("  ✗ Failed to pull from upstream. You may need to resolve conflicts manually.")
-        return False
+        return UPSTREAM_STATE_CURRENT
+    if local_ahead > 0:
+        # An ff-only pull cannot succeed against our own commits (git refuses a diverging
+        # fast-forward), which is exactly what aborted the update while reporting success. Merge so
+        # the local commits survive AND upstream's work lands, then stop loudly on conflict.
+        print(
+            f"\n→ Fork is {upstream_ahead} commit(s) behind upstream and carries {local_ahead} local commit(s)\n"
+            "→ Fast-forward impossible — merging upstream (your commits are preserved)..."
+        )
+        if _git_run(git_cmd, ["merge", "--no-edit", "upstream/main"], cwd).returncode != 0:
+            conflicted = (_git_stdout(git_cmd, ["diff", "--name-only", "--diff-filter=U"], cwd) or "").splitlines()
+            _git_run(git_cmd, ["merge", "--abort"], cwd)
+            print("  ✗ Upstream merge conflicted — aborted, your checkout is unchanged.")
+            for path in conflicted[:10]:
+                print(f"      {path}")
+            if conflicted:
+                print("    ^ resolve these, then re-run `hermes update`")
+            print(f"    Or merge by hand: cd {cwd} && git merge upstream/main")
+            _print_upstream_not_applied(cwd, upstream_ahead)
+            return UPSTREAM_STATE_NOT_APPLIED
+    else:
+        print(f"\n→ Fork is {upstream_ahead} commit(s) behind upstream\n→ Pulling from upstream...")
+        try:
+            subprocess.run(git_cmd + ["pull", "--ff-only", "upstream", "main"], cwd=cwd, check=True, **_no_prompt_git_kwargs())
+        except subprocess.CalledProcessError:
+            print("  ✗ Failed to pull from upstream.")
+            print(f"    Merge by hand: cd {cwd} && git merge upstream/main")
+            _print_upstream_not_applied(cwd, upstream_ahead)
+            return UPSTREAM_STATE_NOT_APPLIED
     print("  ✓ Updated from upstream\n→ Syncing fork...")
     if _sync_fork_with_upstream(git_cmd, cwd):
         print("  ✓ Fork synced with upstream")
@@ -313,7 +370,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
             "  ℹ Got updates from upstream but couldn't push to fork (no write access?)\n"
             "    Your local repo is updated, but your fork on GitHub may be behind."
         )
-    return True
+    return UPSTREAM_STATE_CURRENT
 
 
 def _has_http_code(stderr: str, *codes: str) -> bool:

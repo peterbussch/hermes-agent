@@ -53,7 +53,10 @@ class TestUpstreamPromptNonInteractive:
                 ["git"], fork_without_upstream.cwd, assume_yes=True
             )
 
-        assert checked is False
+        # The sync must not claim it verified upstream. Encoding is the three-state constant
+        # (``UNCHECKED`` = never consulted); what matters is that it is not ``CURRENT``.
+        assert checked == update_cmd.UPSTREAM_STATE_UNCHECKED
+        assert checked != update_cmd.UPSTREAM_STATE_CURRENT
         fork_without_upstream.stdin_input.assert_not_called()
         fork_without_upstream.add_remote.assert_not_called()
         fork_without_upstream.mark_skip.assert_not_called()
@@ -71,7 +74,10 @@ class TestUpstreamPromptNonInteractive:
                 ["git"], fork_without_upstream.cwd
             )
 
-        assert checked is False
+        # The sync must not claim it verified upstream. Encoding is the three-state constant
+        # (``UNCHECKED`` = never consulted); what matters is that it is not ``CURRENT``.
+        assert checked == update_cmd.UPSTREAM_STATE_UNCHECKED
+        assert checked != update_cmd.UPSTREAM_STATE_CURRENT
         fork_without_upstream.stdin_input.assert_not_called()
         fork_without_upstream.add_remote.assert_not_called()
         fork_without_upstream.mark_skip.assert_not_called()

@@ -87,7 +87,8 @@ from hermes_cli.update_cmd_deps import (  # noqa: F401
     _venv_core_imports_healthy, _venv_foreign_owned_paths, _web_build_toolchain_ready,
     _web_toolchain_roots)
 from hermes_cli.update_cmd_git import (  # noqa: F401
-    OFFICIAL_REPO_URL, OFFICIAL_REPO_URLS, SKIP_UPSTREAM_PROMPT_FILE, _ORPHAN_RESCUE_REFS_TO_KEEP,
+    OFFICIAL_REPO_URL, OFFICIAL_REPO_URLS, SKIP_UPSTREAM_PROMPT_FILE, UPSTREAM_STATE_CURRENT,
+    UPSTREAM_STATE_NOT_APPLIED, UPSTREAM_STATE_UNCHECKED, _ORPHAN_RESCUE_REFS_TO_KEEP,
     _ORPHAN_RESCUE_REF_MAX_AGE_DAYS, _add_upstream_remote, _assess_parked_branch_switch,
     _branch_head_label, _branch_head_suffix, _classify_fetch_failure, _count_commits_between,
     _discard_lockfile_churn, _ensure_non_trampoline_git, _get_origin_url, _git_is_trampoline,
@@ -95,7 +96,7 @@ from hermes_cli.update_cmd_git import (  # noqa: F401
     _normalize_managed_eol, _portable_git_candidates, _print_fetch_failure,
     _print_parked_branch_kept_notice, _print_parked_branch_skip_warning,
     _prune_orphan_rescue_refs, _should_skip_upstream_prompt, _sync_fork_with_upstream,
-    _sync_with_upstream_if_needed)
+    _sync_with_upstream_if_needed, upstream_state_of)
 from hermes_cli.update_cmd_maint import (  # noqa: F401
     _PRE_UPDATE_SNAPSHOT_KEEP, _PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE, _STALE_PURGE_PREFIXES,
     _STALE_PURGE_PROTECTED, _UPDATE_RUNTIME_RELOAD_MODULES, _clear_stale_sqlite_sidecars,
@@ -659,7 +660,7 @@ def _pip_install_prefix(uv_bin) -> tuple[list[str], dict | None]:
 def _repair_current_checkout(
     *, assume_yes, gateway_mode, pre_update_snapshot_id, desktop_dir,
     had_desktop_app_before_update, active_lazy_features, active_tool_dependencies,
-    upstream_checked, _windows_gateway_resume) -> bool:
+    upstream_state, _windows_gateway_resume) -> bool:
     """Already-up-to-date path: keep the managed runtime current, repair a broken venv.
     Returns whether the checkout can be reported complete."""
     # "No new commits" != safe interpreter: uv can keep the same CPython patch while
@@ -695,7 +696,9 @@ def _repair_current_checkout(
             _print_verified_update_completion, assume_yes=assume_yes, gateway_mode=gateway_mode,
             pre_update_snapshot_id=pre_update_snapshot_id,
             completion_message=(
-                "✓ Already up to date!" if upstream_checked
+                "✓ Already up to date!" if upstream_state == UPSTREAM_STATE_CURRENT
+                else "⚠ Upstream was NOT applied to this checkout — see the notice above."
+                if upstream_state == UPSTREAM_STATE_NOT_APPLIED
                 else "✓ Up to date with your fork (official repo not checked)."),
             had_desktop_app_before_update=had_desktop_app_before_update)
     if runtime_repaired is not None and not _m()._is_windows():
@@ -837,7 +840,7 @@ class _CheckoutPlan:
     parked_branch_switched: bool
     prompt_for_restore: bool
     switch_block_reason: "str | None"
-    upstream_checked: bool
+    upstream_state: str
 
 
 def _apply_parked_branch_guard(
@@ -938,11 +941,13 @@ def _prepare_checkout_for_update(
     # branch, which returns immediately after: an update that pulled hundreds of upstream commits printed
     # "Already up to date!" and verified nothing). Non-fork checkouts have no upstream question: origin IS
     # the official repo, so "Already up to date!" is fully verified there.
-    upstream_checked = True
+    upstream_state = UPSTREAM_STATE_CURRENT
     if commit_count == 0 and is_fork and branch == "main":
         pre_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
-        upstream_checked = _m()._sync_with_upstream_if_needed(
-            git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn)
+        # ``upstream_state_of`` keeps a bool return (older caller, or a stand-in patched in tests)
+        # readable as the historical "verified current" rather than as a failed sync.
+        upstream_state = upstream_state_of(_m()._sync_with_upstream_if_needed(
+            git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn))
         post_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
         if pre_sync_sha and post_sync_sha and pre_sync_sha != post_sync_sha:
             synced_count = _count_commits_between(
@@ -953,7 +958,7 @@ def _prepare_checkout_for_update(
     return _CheckoutPlan(
         auto_stash_ref=auto_stash_ref, commit_count=commit_count, in_place_update=in_place_update,
         parked_branch_switched=parked_branch_switched, prompt_for_restore=prompt_for_restore,
-        switch_block_reason=switch_block_reason, upstream_checked=upstream_checked)
+        switch_block_reason=switch_block_reason, upstream_state=upstream_state)
 
 
 @dataclass
@@ -1201,7 +1206,7 @@ def _finish_already_up_to_date(
         pre_update_snapshot_id=pre_update_snapshot_id, desktop_dir=desktop_dir,
         had_desktop_app_before_update=had_desktop_app_before_update,
         active_lazy_features=active_lazy_features,
-        active_tool_dependencies=active_tool_dependencies, upstream_checked=_plan.upstream_checked,
+        active_tool_dependencies=active_tool_dependencies, upstream_state=_plan.upstream_state,
         _windows_gateway_resume=_windows_gateway_resume)
     _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
     # A prior pull may still owe the fleet a restart; catch up here too, BEFORE the exit
