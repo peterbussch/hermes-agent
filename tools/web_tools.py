@@ -29,7 +29,7 @@ from plugins.web.firecrawl.provider import (
     check_firecrawl_api_key,
 )
 from tools.debug_helpers import DebugSession
-from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, selection_exists
+from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_exists
 from tools.url_safety import async_is_safe_url
 from tools.web_tools_extract import (
     _extract_safe_urls,
@@ -121,13 +121,15 @@ def _probe(provider, method: str, context: str = "") -> Optional[bool]:
 def _get_backend() -> str:
     """Shared web backend name. A stored ``web.backend`` is returned as-is — no availability probe, no
     fallback — so a broken selection surfaces the vendor's honest error rather than silently rerouting.
-    Autodetect runs ONLY when no web selection has ever been stored."""
+    The managed ``use_gateway`` selection also resolves to firecrawl with no ladder. Autodetect runs
+    whenever no SHARED web selection was ever stored: per-capability keys (``web.search_backend``,
+    ``web.extract_backend``) name only their own capability and never reroute the other (#113017)."""
     configured = _configured_backend()
     if configured:
         # "nous" (managed subscription) is serviced by firecrawl, routed through the managed Tool Gateway.
         return "firecrawl" if configured == NOUS_MANAGED_PROVIDER else configured
-    if selection_exists("web"):
-        # Selection exists (use_gateway / per-capability keys) but no shared name: firecrawl, no ladder.
+    if read_selection("web") is not None:
+        # Shared selection exists (use_gateway) but no shared name: firecrawl, no ladder.
         return "firecrawl"
 
     # Never-configured install. Explicit user credentials beat the managed-gateway probe (a Nous OAuth
@@ -181,13 +183,11 @@ def _get_capability_backend(capability: str) -> str:
     cfg = _load_web_config()
     specific = str(cfg.get(f"{capability}_backend") or "").lower().strip()
     if specific:
-        provider = _registered_web_provider(specific)
-        if provider is not None:
-            supports = _probe(provider, f"supports_{capability}")
-            if supports:
-                return specific
-        if _is_backend_available(specific):
-            return specific
+        # An explicitly configured capability key is honoured verbatim — ``web.extract_backend`` is strict, no probe.
+        # Probing here silently substituted another provider when the configured one was not registered or not yet
+        # keyed, e.g. resolving extraction to a search-only backend and hiding the operator's intent. A bad name or
+        # missing credential now fails at call time, where the error names the backend.
+        return specific
     if str(cfg.get("backend") or "").strip():
         return _get_backend()
     try:
