@@ -1,6 +1,7 @@
 """Regression for #110589: housekeeping forwards each profile's source retention."""
 
 import time
+from pathlib import Path
 
 
 def test_housekeeping_passes_profile_retention_to_live_store(tmp_path, monkeypatch):
@@ -10,6 +11,7 @@ def test_housekeeping_passes_profile_retention_to_live_store(tmp_path, monkeypat
 
     home_a = tmp_path / "a"
     home_b = tmp_path / "b"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(home_a))
     for home, days in ((home_a, 14), (home_b, 70)):
         home.mkdir()

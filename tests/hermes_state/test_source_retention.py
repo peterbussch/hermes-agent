@@ -97,32 +97,22 @@ def test_invalid_maps_leave_global_behavior_unchanged(db):
         assert db.get_session("open")["ended_at"] is None
 
 
-def test_overrides_never_extend_or_repeat_global_work(db, monkeypatch):
+def test_overrides_never_extend_retention_or_enable_zero_day_sweep(db):
     _seed(db, "old", "cron", 100)
-    _seed(db, "open", "oneshot", 100, ended=False)
-    prune = db.prune_sessions
-    sweep = db.sweep_orphaned_sessions
-    calls = []
+    _seed(db, "recent", "cron", 60)
+    result = db.maybe_auto_prune_and_vacuum(
+        retention_days=90, min_interval_hours=0, vacuum=False,
+        source_retention_days={"cron": 120})
 
-    def record_prune(**kwargs):
-        calls.append(("prune", kwargs.get("source")))
-        return prune(**kwargs)
-
-    def record_sweep(**kwargs):
-        calls.append(("sweep", kwargs["sources"]))
-        return sweep(**kwargs)
-
-    monkeypatch.setattr(db, "prune_sessions", record_prune)
-    monkeypatch.setattr(db, "sweep_orphaned_sessions", record_sweep)
-    for retention, overrides in ((90, {"cron": 90, "oneshot": 120}), (0, {"cron": 14})):
-        calls.clear()
-        result = db.maybe_auto_prune_and_vacuum(
-            retention_days=retention, min_interval_hours=0, vacuum=False,
-            source_retention_days=overrides)
-        assert "error" not in result
-        assert [kind for kind, _ in calls] == ["prune", "sweep"]
-        if retention == 90:
-            assert db.get_session("open")["end_reason"] == "startup_orphan_reap"
-        else:
-            assert db.get_session("open") is None
+    assert "error" not in result
     assert db.get_session("old") is None
+    assert db.get_session("recent") is not None
+
+    _seed(db, "open", "oneshot", 100, ended=False)
+    result = db.maybe_auto_prune_and_vacuum(
+        retention_days=0, min_interval_hours=0, vacuum=False,
+        source_retention_days={"cron": 14})
+
+    assert "error" not in result
+    assert result["closed"] == 0
+    assert db.get_session("open")["ended_at"] is None

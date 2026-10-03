@@ -504,9 +504,11 @@ class SessionMaintenanceMixin:
             # Record even when pruned == 0 so the throttle holds.
             self.set_meta("last_auto_prune", str(now))
             if result["closed"] or result["pruned"] > 0:
+                retention = (f"(retention {retention_days} days; per-source {overrides})"
+                             if overrides else f"inactive for {retention_days} days")
                 logger.info("state.db auto-maintenance: closed %d stale open session(s), "
-                            "pruned %d session(s) inactive for %d days%s",
-                            result["closed"], result["pruned"], retention_days,
+                            "pruned %d session(s) %s%s",
+                            result["closed"], result["pruned"], retention,
                             " + VACUUM" if result["vacuumed"] else "")
         except Exception as exc:
             # Maintenance must never block startup.
