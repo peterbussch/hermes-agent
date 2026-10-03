@@ -1029,6 +1029,11 @@ group_sessions_per_user: true
 # sessions:
 #   auto_prune: true
 #   retention_days: 90
+#   # Optional shorter per-source windows; unset/empty keeps the global default.
+#   source_retention_days:
+#     cron: 14
+#     subagent: 14
+#     oneshot: 14
 #   vacuum_after_prune: true
 #   min_vacuum_interval_days: 30
 #   min_interval_hours: 24

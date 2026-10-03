@@ -2245,6 +2245,8 @@ DEFAULT_CONFIG = {
         # retention window before removal. Default true since #54189: without it state.db grows without
         # bound (multi-GB installs reported within weeks).
         "retention_days": 90,
+        # Tighten automation sources' retention without shortening interactive history.
+        "source_retention_days": {},
         # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
         # once per min_interval_hours. Pinned sessions are exempt.
         "auto_archive": False,
