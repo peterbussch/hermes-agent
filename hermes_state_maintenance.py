@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from hermes_state_common import (
     AUTO_VACUUM_MIN_FREELIST_RATIO, _id_chunks, _placeholders, _sql_session_last_active, escape_like as _escape_like
@@ -24,33 +25,23 @@ def _like(value: str) -> str:
     return f"%{_escape_like(value.lower())}%"
 
 
-def _configured_source_retention_days() -> Dict[str, float]:
-    """``sessions.source_retention_days`` map from config.yaml (``{source: days}``); ``{}`` when unset/invalid.
-
-    Per-source retention overrides for the auto-prune sweep (#110589): automation-heavy
-    installs (a cron-dominant store with FTS amplification) age that class out on a
-    shorter window without touching the human-history default. Overrides only tighten —
-    the global pass has already run, so a source cannot be kept longer than
-    ``sessions.retention_days``.
-    """
-    try:
-        from hermes_cli.config import load_config_readonly
-        raw = (load_config_readonly().get("sessions") or {}).get("source_retention_days")
-        if not isinstance(raw, dict):
-            return {}
-        out: Dict[str, float] = {}
-        for source, days in raw.items():
-            if not isinstance(source, str) or not source:
-                continue
-            try:
-                days_f = float(days)
-            except (TypeError, ValueError):
-                continue
-            if days_f > 0:
-                out[source] = days_f
-        return out
-    except Exception:
+def normalize_source_retention_days(raw: Any) -> Dict[str, float]:
+    """Ignore invalid overrides rather than turning booleans or strings into day counts."""
+    if not isinstance(raw, dict):
         return {}
+    out: Dict[str, float] = {}
+    for source, days in raw.items():
+        if not isinstance(source, str) or not source:
+            continue
+        if isinstance(days, bool) or not isinstance(days, (int, float)):
+            continue
+        try:
+            days_f = float(days)
+        except OverflowError:
+            continue
+        if math.isfinite(days_f) and days_f > 0:
+            out[source] = days_f
+    return out
 
 
 def _cwd_prefix_filter(value: str) -> Tuple[List[str], list]:
@@ -401,6 +392,7 @@ class SessionMaintenanceMixin:
         self, retention_days: int = 90, min_interval_hours: int = 24, vacuum: bool = True,
         sessions_dir: Optional[Path] = None, min_vacuum_interval_days: int = 30,
         min_vacuum_freelist_ratio: float = AUTO_VACUUM_MIN_FREELIST_RATIO,
+        *, source_retention_days: Optional[Mapping[str, float]] = None,
     ) -> Dict[str, Any]:
         """Idempotent startup auto-maintenance (never raises): prune inactive sessions, reap stale open
         state-owned rows, optional VACUUM.  Runs at most once per ``min_interval_hours``; VACUUM has its own
@@ -408,7 +400,8 @@ class SessionMaintenanceMixin:
         ``min_vacuum_freelist_ratio`` so a small prune on a dense multi-GB database never triggers a full
         rewrite.  Stale-open reconciliation: cron/kanban/subagent/one-shot CLI rows never set ``ended_at``
         when their process dies and prune only deletes ended rows, so after pruning, open rows from
-        :attr:`_AUTO_PRUNE_STALE_OPEN_SOURCES` older than ``retention_days`` are closed
+        :attr:`_AUTO_PRUNE_STALE_OPEN_SOURCES` older than ``retention_days`` (or a shorter
+        ``source_retention_days`` override) are closed
         (``startup_orphan_reap``); they stay resumable and age from their close.  Returns ``{"skipped",
         "pruned", "closed", "vacuumed"}`` plus ``"freelist_ratio"`` when a VACUUM was considered and
         ``"error"`` on failure.
@@ -418,7 +411,7 @@ class SessionMaintenanceMixin:
         scheduler). See #54189.
         When *sessions_dir* is provided, on-disk transcript files (``.json`` / ``.jsonl`` /
         ``request_dump_*``) for pruned sessions are removed as part of the same sweep (issue #3015).
-        Messaging and UI sources are never touched here. See #54189.
+        Messaging and UI sources are never reaped as stale open rows here. See #54189.
         """
         from hermes_state_repair import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
         result: Dict[str, Any] = {"skipped": False, "pruned": 0, "closed": 0, "vacuumed": False}
@@ -447,12 +440,13 @@ class SessionMaintenanceMixin:
             # _MAX_LEASE_S=900 per call, so a multi-minute step renews per step rather than
             # once at entry. No-op when the watchdog is not armed; never raises.
             report_startup_progress(900.0, phase="state_db_auto_prune")
-            result["pruned"] = pruned = self.prune_sessions(
+            result["pruned"] = self.prune_sessions(
                 older_than_days=retention_days, sessions_dir=sessions_dir, exclude_active_write_guards=True)
-            # Per-source retention overrides (#110589): age automation-heavy source
-            # classes out faster than the global window (cron dominance + FTS
-            # amplification). Overrides only tighten — the global pass already ran.
-            for source, days in sorted(_configured_source_retention_days().items()):
+            # The global pass already ran: overrides can only tighten its window.
+            overrides = {source: days for source, days in
+                         normalize_source_retention_days(source_retention_days).items()
+                         if days < retention_days}
+            for source, days in sorted(overrides.items()):
                 result["pruned"] += self.prune_sessions(
                     older_than_days=days, source=source, sessions_dir=sessions_dir,
                     exclude_active_write_guards=True)
@@ -463,11 +457,18 @@ class SessionMaintenanceMixin:
                 respect_gateway_heartbeats=False,  # state-owned lifecycles, not gateway heartbeats
             )
             result["closed"] = len(closed)
+            for source, days in sorted(overrides.items()):
+                if source not in self._AUTO_PRUNE_STALE_OPEN_SOURCES:
+                    continue
+                closed = self.sweep_orphaned_sessions(
+                    max_idle_seconds=days * 86400.0, sources=(source,),
+                    exclude_pinned=True, respect_gateway_heartbeats=False)
+                result["closed"] += len(closed)
             # VACUUM only if rows were freed, the time throttle passed AND the
             # freelist ratio passed — it holds an exclusive lock for a full rewrite.
             since_vacuum = _seconds_since(now, self.get_meta("last_vacuum"))
             vacuum_due = since_vacuum is None or since_vacuum >= min_vacuum_interval_days * 86400
-            if vacuum and pruned > 0 and vacuum_due:
+            if vacuum and result["pruned"] > 0 and vacuum_due:
                 result["freelist_ratio"] = ratio = self._freelist_ratio()
                 # Same admission `hermes sessions optimize` runs: VACUUM plus the TRUNCATE checkpoint
                 # retire the WAL generation a sibling writer (gateway, Desktop, dashboard, cron) still
@@ -502,10 +503,11 @@ class SessionMaintenanceMixin:
                                  ratio * 100.0, min_vacuum_freelist_ratio * 100.0)
             # Record even when pruned == 0 so the throttle holds.
             self.set_meta("last_auto_prune", str(now))
-            if closed or pruned > 0:
+            if result["closed"] or result["pruned"] > 0:
                 logger.info("state.db auto-maintenance: closed %d stale open session(s), "
                             "pruned %d session(s) inactive for %d days%s",
-                            len(closed), pruned, retention_days, " + VACUUM" if result["vacuumed"] else "")
+                            result["closed"], result["pruned"], retention_days,
+                            " + VACUUM" if result["vacuumed"] else "")
         except Exception as exc:
             # Maintenance must never block startup.
             logger.warning("state.db auto-maintenance failed: %s", exc)
