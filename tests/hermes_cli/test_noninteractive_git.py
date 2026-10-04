@@ -96,6 +96,29 @@ class TestNoninteractiveGitEnv:
         assert values["sequence.editor"] == "true"
         assert values["diff.external"] == ""
 
+    def test_status_probe_does_not_take_optional_index_lock(self, tmp_path):
+        # git status refreshes the index stat cache under index.lock unless optional locks are
+        # off; a probe killed mid-refresh used to leave that lock behind in the user's repo.
+        assert noninteractive_git_env({})["GIT_OPTIONAL_LOCKS"] == "0"
+
+        base = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        tracked = tmp_path / "tracked.txt"
+        tracked.write_text("x\n")
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=base)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "tracked.txt"], check=True, env=base)
+        index = tmp_path / ".git" / "index"
+
+        def status_rewrites_index(env):
+            later = time.time() + 120
+            os.utime(tracked, (later, later))
+            before = index.read_bytes()
+            subprocess.run(["git", "-C", str(tmp_path), "status", "--porcelain=2"],
+                           check=True, capture_output=True, stdin=subprocess.DEVNULL, env=env)
+            return index.read_bytes() != before
+
+        assert status_rewrites_index(noninteractive_git_env(base)) is False
+        assert status_rewrites_index(base) is True  # control: the default does write the index
+
     @pytest.mark.real_safe_directory
     def test_safe_directory_preserves_git_ordering_and_reset_markers(self, tmp_path, monkeypatch):
         """The user's effective trust policy is replayed verbatim, resets included.

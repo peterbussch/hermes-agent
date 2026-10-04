@@ -361,6 +361,9 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
     env["GIT_PAGER"] = "cat"
     env["PAGER"] = "cat"
     env["GIT_EDITOR"] = "true"
+    # Read-only probes (``git status``) otherwise take index.lock to refresh the stat cache; a
+    # timeout kill then leaves the lock behind and breaks the user's next commit.
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     overrides = list(_GIT_CONFIG_OVERRIDES.items())
     # safe.directory is honoured ONLY from global/system config (git rejects it from repo-level
     # config so a hostile repo cannot self-authorise), and both are blanked just above. Without
